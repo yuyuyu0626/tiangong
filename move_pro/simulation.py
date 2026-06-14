@@ -93,6 +93,7 @@ class PreparedBox:
     source_pose: tuple[float, float, float]
     pick_error: float
     place_error: float
+    stand_off: float
 
 
 def _source_pose(box_size: tuple[float, float, float]) -> tuple[float, float, float]:
@@ -330,22 +331,75 @@ def _prepare_boxes(
             continue
         box_size = task.world_size
         source_pose = _source_pose(box_size)
-        scene = _make_bpp_scene(
-            task.world_target,
-            box_size,
+        candidate_offsets = (
             stand_off,
-            tuple(preset_boxes),
+            0.42,
+            0.50,
+            0.60,
+            0.68,
+            0.72,
+            0.80,
+            0.90,
         )
-        with _dynamic_move_box(scene, box_size, source_pose):
-            report, move_plan = _move_grab.run(
-                place_mode="move", stand_off=stand_off
+        attempts = []
+        seen_offsets = set()
+        for candidate_offset in candidate_offsets:
+            candidate_offset = round(float(candidate_offset), 3)
+            if candidate_offset in seen_offsets:
+                continue
+            seen_offsets.add(candidate_offset)
+            candidate_scene = _make_bpp_scene(
+                task.world_target,
+                box_size,
+                candidate_offset,
+                tuple(preset_boxes),
             )
-        if not report.pick_feasible or not report.place_feasible:
+            with _dynamic_move_box(
+                candidate_scene, box_size, source_pose
+            ):
+                candidate_report, candidate_plan = _move_grab.run(
+                    place_mode="move", stand_off=candidate_offset
+                )
+            attempts.append(
+                (
+                    candidate_report.pick_max_error
+                    + candidate_report.place_max_error,
+                    candidate_offset,
+                    candidate_scene,
+                    candidate_report,
+                    candidate_plan,
+                )
+            )
+            if (
+                candidate_report.pick_feasible
+                and candidate_report.place_feasible
+            ):
+                break
+
+        feasible_attempts = [
+            attempt
+            for attempt in attempts
+            if attempt[3].pick_feasible and attempt[3].place_feasible
+        ]
+        if not feasible_attempts:
+            details = ", ".join(
+                f"{offset:.2f}:"
+                f"{attempt_report.pick_max_error:.4f}/"
+                f"{attempt_report.place_max_error:.4f}"
+                for _, offset, _, attempt_report, _ in attempts
+            )
             raise RuntimeError(
                 f"IK infeasible for box {task.index}: "
-                f"pick={report.pick_max_error:.4f}, "
-                f"place={report.place_max_error:.4f}"
+                f"stand_off attempts [{details}]"
             )
+        _, selected_offset, scene, report, move_plan = min(
+            feasible_attempts, key=lambda attempt: attempt[0]
+        )
+        print(
+            f"  prepared box={task.index} stand_off={selected_offset:.2f} "
+            f"pick={report.pick_max_error:.4f} "
+            f"place={report.place_max_error:.4f}"
+        )
         prepared.append(
             PreparedBox(
                 task=task,
@@ -354,6 +408,7 @@ def _prepare_boxes(
                 source_pose=source_pose,
                 pick_error=report.pick_max_error,
                 place_error=report.place_max_error,
+                stand_off=selected_offset,
             )
         )
         target = task.world_target
@@ -714,6 +769,7 @@ class MoveProSimulator:
                     f"\nmove_pro_start_box box={item.task.index} "
                     f"size={item.task.world_size} "
                     f"target={item.task.world_target} "
+                    f"stand_off={item.stand_off:.2f} "
                     f"ik=({item.pick_error:.4f},{item.place_error:.4f})"
                 )
                 global_frame, keep_running = _play_box(
