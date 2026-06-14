@@ -1,0 +1,36 @@
+# 压缩包
+*.zip
+*.tar.gz
+*.rar
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# 执行日志 & 中间结果
+logs/
+*.pt
+*.npy
+*.csv
+*.out
+*.log
+*.pth
+checkpoints/
+
+# Isaac Gym
+*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 嵌套的 git 仓库（Online-3D-BPP-PCT 原作者的 .git）
+Online-3D-BPP-PCT/.git/
