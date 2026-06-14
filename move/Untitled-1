@@ -10,6 +10,126 @@ Building extension module gymtorch...
 Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
 ninja: no work to do.
 Loading extension module gymtorch...
+
+============================================================
+  move_pro 智能码垛 — Isaac Gym 仿真模式
+  方法: LSAH, 箱数: 20
+============================================================
+
+========================================================================
+MovePro online packing plan
+========================================================================
+boxes: 20/20
+utilization: 15.69%
+[ok] box 0: size=(0.2, 0.1, 0.1) target=(3.736, 3.086, 0.150) rotation=0
+[ok] box 1: size=(0.1, 0.1, 0.1) target=(3.886, 3.086, 0.150) rotation=0
+[ok] box 2: size=(0.2, 0.2, 0.30000000000000004) target=(3.736, 3.136, 0.350) rotation=0
+[ok] box 3: size=(0.2, 0.2, 0.2) target=(4.036, 3.136, 0.200) rotation=0
+[ok] box 4: size=(0.2, 0.2, 0.2) target=(4.236, 3.136, 0.200) rotation=0
+[ok] box 5: size=(0.1, 0.2, 0.2) target=(4.386, 3.136, 0.200) rotation=0
+[ok] box 6: size=(0.1, 0.2, 0.1) target=(4.486, 3.136, 0.150) rotation=1
+[ok] box 7: size=(0.4, 0.3, 0.30000000000000004) target=(4.036, 3.186, 0.450) rotation=0
+[ok] box 8: size=(0.2, 0.1, 0.1) target=(3.736, 3.286, 0.150) rotation=1
+[ok] box 9: size=(0.4, 0.4, 0.4) target=(4.436, 3.436, 0.300) rotation=0
+[ok] box 10: size=(0.3, 0.3, 0.2) target=(3.786, 3.486, 0.200) rotation=0
+[ok] box 11: size=(0.1, 0.1, 0.2) target=(4.586, 3.086, 0.200) rotation=0
+[ok] box 12: size=(0.1, 0.1, 0.1) target=(4.586, 3.186, 0.150) rotation=0
+[ok] box 13: size=(0.2, 0.1, 0.1) target=(4.036, 3.386, 0.150) rotation=1
+[ok] box 14: size=(0.2, 0.2, 0.1) target=(4.036, 3.536, 0.150) rotation=0
+[ok] box 15: size=(0.2, 0.2, 0.2) target=(4.036, 3.436, 0.300) rotation=0
+[ok] box 16: size=(0.4, 0.3, 0.30000000000000004) target=(3.836, 3.786, 0.250) rotation=1
+[ok] box 17: size=(0.1, 0.1, 0.1) target=(4.186, 3.386, 0.150) rotation=0
+[ok] box 18: size=(0.4, 0.3, 0.30000000000000004) target=(4.236, 3.786, 0.250) rotation=0
+[ok] box 19: size=(0.2, 0.2, 0.1) target=(4.536, 3.736, 0.150) rotation=0
+Not connected to PVD
+Physics Engine: PhysX
+Physics Device: cpu
+GPU Pipeline: disabled
+Using VHACD cache directory '/home/u2004/.isaacgym/vhacd'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/base_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/body_yaw_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/camera_head_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/elbow_pitch_l_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/elbow_pitch_r_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/elbow_yaw_l_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/elbow_yaw_r_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/first_leg_pitch_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/head_pitch_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/head_roll_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/head_yaw_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/second_leg_pitch_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/shoulder_pitch_l_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/shoulder_pitch_r_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/shoulder_roll_l_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/shoulder_roll_r_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/shoulder_yaw_l_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/shoulder_yaw_r_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/waist_pitch_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/wrist_pitch_l_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/wrist_pitch_r_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/wrist_roll_l_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/tianyi/meshes/wrist_roll_r_link_simplified_10x.obj'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_back_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_ee_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_index_bend_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_index_rota_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_index_rota_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_index_rota_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_index_rotaback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_index_rotaback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_mid_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_mid_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_mid_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_midback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_midback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_pinky_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_pinky_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_pinky_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_pinkyback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_pinkyback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_ring_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_ring_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_ring_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_ringback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_ringback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_thumb_bend_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_thumb_rota_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_thumb_rota_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_thumb_rota_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_thumb_rotaback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/left/meshes/left_hand_thumb_rotaback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_back_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_ee_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_index_bend_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_index_rota_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_index_rota_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_index_rota_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_index_rotaback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_index_rotaback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_mid_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_mid_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_mid_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_midback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_midback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_pinky_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_pinky_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_pinky_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_pinkyback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_pinkyback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_ring_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_ring_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_ring_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_ringback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_ringback_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_thumb_bend_link.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_thumb_rota_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_thumb_rota_link2.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_thumb_rota_tip.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_thumb_rotaback_link1.STL'
+Found existing convex decomposition for mesh '/home/u2004/yyx/tiangong/move/assets/xhand/right/meshes/right_hand_thumb_rotaback_link2.STL'
+Preparing move IK plans for all boxes...
 Traceback (most recent call last):
   File "/home/u2004/miniconda3/envs/rlgpu/lib/python3.7/runpy.py", line 193, in _run_module_as_main
     "__main__", mod_spec)
@@ -19,34 +139,10 @@ Traceback (most recent call last):
     main()
   File "/home/u2004/yyx/tiangong/move_pro/run.py", line 146, in main
     cmd_sim(args)
-  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 76, in cmd_sim
-    from move_pro.simulation import MoveProSimulator
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 82, in <module>
-    tuple[float, float, float],
-TypeError: 'type' object is not subscriptable
-(rlgpu) u2004@u2004-Z790-EAGLE-AX:~/yyx/tiangong$ python -m move_pro.run --mode sim --method LSAH --num-boxes 20 --fast
-Importing module 'gym_37' (/home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_37.so)
-Setting GYM_USD_PLUG_INFO_PATH to /home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
-PyTorch version 1.8.1
-Device count 1
-/home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/src/gymtorch
-Using /home/u2004/.cache/torch_extensions as PyTorch extensions root...
-Emitting ninja build file /home/u2004/.cache/torch_extensions/gymtorch/build.ninja...
-Building extension module gymtorch...
-Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
-ninja: no work to do.
-Loading extension module gymtorch...
-Traceback (most recent call last):
-  File "/home/u2004/miniconda3/envs/rlgpu/lib/python3.7/runpy.py", line 193, in _run_module_as_main
-    "__main__", mod_spec)
-  File "/home/u2004/miniconda3/envs/rlgpu/lib/python3.7/runpy.py", line 85, in _run_code
-    exec(code, run_globals)
-  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 150, in <module>
-    main()
-  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 146, in main
-    cmd_sim(args)
-  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 76, in cmd_sim
-    from move_pro.simulation import MoveProSimulator
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 82, in <module>
-    tuple[float, float, float],
-TypeError: 'type' object is not subscriptable
+  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 89, in cmd_sim
+    max_frames=args.max_frames)
+  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 660, in run
+    prepared = _prepare_boxes(plan, dof_names, self.stand_off)
+  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 345, in _prepare_boxes
+    f"IK infeasible for box {task.index}: "
+RuntimeError: IK infeasible for box 5: pick=0.0022, place=0.0782
