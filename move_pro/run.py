@@ -85,7 +85,8 @@ def cmd_sim(args):
 
     sim = MoveProSimulator(method=args.method)
     sim.run(boxes, sizes_are_pct=True,
-            headless=args.headless, fast=args.fast)
+            headless=args.headless, fast=args.fast,
+            max_frames=args.max_frames)
 
 
 def main():

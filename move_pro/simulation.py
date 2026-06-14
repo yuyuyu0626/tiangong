@@ -32,8 +32,8 @@ from move_pro.integrator import MoveProIntegrator, MoveProPlan     # noqa: E402
 from move_pro.config import pallet_center_world                     # noqa: E402
 
 # ---- 以下全部来自 move 项目 ----
-import move.grab_test as _gt                                         # noqa: E402
-from move.grab_test import (                                        # noqa: E402
+import move_pro.grab_test as _gt                                     # noqa: E402
+from move_pro.grab_test import (                                    # noqa: E402
     SIM_PLACE_STAND_OFF, _target_world_center, MOVE_URDF,
     build_offline_test3_scene, OfflineTest3Scene,
 )
@@ -44,7 +44,7 @@ from move.planning import (                                         # noqa: E402
 )
 
 
-def _make_bpp_scene(target_world_center, box_size_m, stand_off):
+def _make_bpp_scene(target_world_center, box_size_m, stand_off, preset_boxes=()):
     """为 BPP 目标构造与 build_offline_test3_scene 兼容的 OfflineTest3Scene。"""
     sx, sy, sz = box_size_m
     pc = pallet_center_near_table()
@@ -57,13 +57,16 @@ def _make_bpp_scene(target_world_center, box_size_m, stand_off):
     target_box = BoxPlacement("bpp_target", target_min, box_size_m)
 
     # 虚拟底面（避免 grab_test 内部 max() 空序列报错）
-    dummy = BoxPlacement("_gnd", (0.0, 0.0, 0.0),
-                         (PALLET_SIZE[0], PALLET_SIZE[1], 0.001))
+    floor_support = BoxPlacement(
+        "_pallet_support",
+        (0.0, 0.0, 0.0),
+        (PALLET_SIZE[0], PALLET_SIZE[1], 0.001),
+    )
     stack_scene = StackScene(
         pallet_center=pc,
         pallet_size=PALLET_SIZE,
         pallet_surface_z=PALLET_SURFACE_Z,
-        preset_boxes=(dummy,),
+        preset_boxes=(floor_support, *tuple(preset_boxes)),
         next_box=target_box,
         empty_spaces=(),
         selected_leaf=EmptySpace(target_box.min_corner, target_box.max_corner),
@@ -73,33 +76,61 @@ def _make_bpp_scene(target_world_center, box_size_m, stand_off):
     waypoints = _gt._build_test3_waypoints(stack_scene, final_pose, tmp_pose)
     return OfflineTest3Scene(
         name="bpp_target", stack_scene=stack_scene,
-        target_support_z=PALLET_SURFACE_Z,
+        target_support_z=target_world_center[2] - sz * 0.5,
         final_pose=final_pose, tmp_pose=tmp_pose, waypoints=waypoints,
     )
 
 
-def run_single_box(box_size_m, target_world_center, stand_off, headless, fast):
+def run_single_box(
+    box_size_m,
+    target_world_center,
+    stand_off,
+    headless,
+    fast,
+    preset_boxes=(),
+    max_frames=0,
+):
     """对单个箱子运行一次完整的 grab_test_task 仿真。
 
     通过 monkey-patch build_offline_test3_scene 注入 BPP 目标。
     所有仿真逻辑完全由 move 项目代码驱动。
     """
     # 1. 构造 BPP 场景
-    bpp_scene = _make_bpp_scene(target_world_center, box_size_m, stand_off)
+    bpp_scene = _make_bpp_scene(
+        target_world_center,
+        box_size_m,
+        stand_off,
+        preset_boxes=preset_boxes,
+    )
 
     # 2. Monkey-patch: 使 grab_test.run() 使用 BPP 目标
     _original_build = _gt.build_offline_test3_scene
+    _original_size = _gt.BOX_SIZE
+    _original_pose = _gt.BOX_POSE
     _gt.build_offline_test3_scene = lambda stand_off=stand_off: bpp_scene
+    _gt.BOX_SIZE = tuple(box_size_m)
+    _gt.BOX_POSE = (
+        _original_pose[0],
+        _original_pose[1],
+        _gt.TABLE_POSE[2] + _gt.TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
+    )
 
     try:
         # 3. 直接调用 grab_test_task.main() 的核心逻辑
         #    （不做任何自定义重写）
-        _run_grab_test_task_single(headless=headless, stand_off=stand_off, fast=fast)
+        _run_grab_test_task_single(
+            headless=headless,
+            stand_off=stand_off,
+            fast=fast,
+            max_frames=max_frames,
+        )
     finally:
         _gt.build_offline_test3_scene = _original_build
+        _gt.BOX_SIZE = _original_size
+        _gt.BOX_POSE = _original_pose
 
 
-def _run_grab_test_task_single(headless, stand_off, fast):
+def _run_grab_test_task_single(headless, stand_off, fast, max_frames=0):
     """一次完整的 grab_test_task 仿真——代码直接来自 move/tasks/grab_test_task.py。
 
     这是 grab_test_task.main() 的逐行复制，仅做必要的最小修改：
@@ -111,7 +142,12 @@ def _run_grab_test_task_single(headless, stand_off, fast):
 
     import numpy as np
 
-    from move.tasks.grab_test_task import (
+    import move_pro.tasks.grab_test_task as _grab_task
+
+    _grab_task.BOX_SIZE = _gt.BOX_SIZE
+    _grab_task.BOX_POSE = _gt.BOX_POSE
+
+    from move_pro.tasks.grab_test_task import (
         _lerp_tensor, _smoothstep, _lerp_pose,
         _smooth_timeline_joint_steps,
         _expand_key_targets, _expand_centers,
@@ -130,7 +166,7 @@ def _run_grab_test_task_single(headless, stand_off, fast):
         PLACE_HANDOFF_FRAMES, PLACE_SEGMENT_FRAMES, FINAL_HOLD_FRAMES,
         ATTACH_AFTER_PICK_FRAMES,
     )
-    from move.tasks.move_test1 import create_sim, load_robot_asset
+    from move_pro.tasks.move_test1 import create_sim, load_robot_asset
 
     # 调用 grab_test.run() 获取计划
     report, plan = _gt.run(place_mode="move", stand_off=stand_off)
@@ -176,7 +212,7 @@ def _run_grab_test_task_single(headless, stand_off, fast):
     root_frames_list = []
     for wp_start, wp_goal in zip(root_route, root_route[1:] if len(root_route) > 1 else ([], [])):
         if wp_start[1] != wp_goal[1]:
-            from move.planning import sample_root_trajectory
+            from move_pro.planning import sample_root_trajectory
             root_frames_list.extend(sample_root_trajectory(wp_start[1], wp_goal[1]))
     root_frames_list += [root_frames_list[-1]] * MOVE_SETTLE_FRAMES if root_frames_list else []
 
@@ -344,7 +380,7 @@ def _run_grab_test_task_single(headless, stand_off, fast):
                       f"attached={attached} released={released}")
 
             frame += 1
-            if frame >= len(timeline):
+            if frame >= len(timeline) or (max_frames > 0 and frame >= max_frames):
                 break
     finally:
         ab = _actor_center(gym, env, source)
@@ -371,7 +407,14 @@ class MoveProSimulator:
         self.integrator = MoveProIntegrator(method=method, container_size=container_size,
                                             stand_off=stand_off)
 
-    def run(self, box_sequence, sizes_are_pct=True, headless=False, fast=False):
+    def run(
+        self,
+        box_sequence,
+        sizes_are_pct=True,
+        headless=False,
+        fast=False,
+        max_frames=0,
+    ):
         # 1. BPP 决策
         print("BPP 决策中 ...")
         plan = self.integrator.build_plan(box_sequence, compute_ik=False,
@@ -379,11 +422,12 @@ class MoveProSimulator:
         print(plan.summary())
 
         placed = 0
+        preset_boxes = []
         for bt in plan.box_tasks:
             if not bt.placement.feasible:
                 continue
 
-            box_sz = (bt.pct_size[0]*0.1, bt.pct_size[1]*0.1, bt.pct_size[2]*0.1)
+            box_sz = bt.world_size
             target = bt.world_target
 
             print(f"\n{'='*50}")
@@ -391,8 +435,28 @@ class MoveProSimulator:
             print(f"{'='*50}")
 
             try:
-                run_single_box(box_sz, target, self.stand_off, headless, fast)
+                run_single_box(
+                    box_sz,
+                    target,
+                    self.stand_off,
+                    headless,
+                    fast,
+                    preset_boxes=tuple(preset_boxes),
+                    max_frames=max_frames,
+                )
                 placed += 1
+                pc = pallet_center_near_table()
+                preset_boxes.append(
+                    BoxPlacement(
+                        f"placed_{bt.index}",
+                        (
+                            target[0] - pc[0] + PALLET_SIZE[0] * 0.5 - box_sz[0] * 0.5,
+                            target[1] - pc[1] + PALLET_SIZE[1] * 0.5 - box_sz[1] * 0.5,
+                            target[2] - PALLET_SURFACE_Z - box_sz[2] * 0.5,
+                        ),
+                        box_sz,
+                    )
+                )
             except Exception as e:
                 import traceback
                 print(f"  箱#{bt.index} 仿真异常: {e}")
