@@ -42,3 +42,17 @@ python -m move_pro.tasks.task2_2 --fast-viewer --viewer-render-every 8
 
 They intentionally retain imports from `move`; this keeps their runtime
 behavior byte-for-byte aligned with the known working project.
+
+## Continuous simulation
+
+Simulation mode now creates one Isaac Gym simulation, one environment, and
+one viewer for the complete sequence:
+
+```bash
+python -m move_pro.run --mode sim --method LSAH --num-boxes 20 --fast
+```
+
+All variable-size box actors are created once. Boxes wait outside the work
+area, move to the source table when selected, and remain in the pallet scene
+after release. Each actor receives a stable color at creation, so its color is
+preserved through picking, carrying, and placement.

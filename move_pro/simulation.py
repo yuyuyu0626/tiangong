@@ -1,425 +1,630 @@
-"""move_pro 仿真 — 直接复用 move/grab_test_task 的完整逻辑。
+"""Continuous multi-box Isaac Gym simulation for move_pro.
 
-除了用 BPP 决策替换固定放置目标外，所有代码（IK、
-时间线构建、仿真主循环、attach/detach、碰撞处理）
-均直接来自 move 项目，不做任何自定义重写。
-
-工作原理：
-1. BPP 决策为每个箱子确定放置位置
-2. Monkey-patch grab_test.build_offline_test3_scene 为目标位置
-3. 调用 grab_test_task 的完整流程播放单箱抓取→移动→放置
-4. 循环下一个箱子
+PCT selects each target online. The robot motion, IK helpers, timeline
+construction, and attach/release behavior come from the original move project.
+Unlike the first move_pro prototype, one simulation and one viewer are kept
+alive for the complete box sequence.
 """
 
 from __future__ import annotations
 
-# ⚠️ Isaac Gym 必须在 torch 之前导入（硬性要求）
-from isaacgym import gymapi, gymtorch  # noqa: E402
-import torch  # noqa: E402
+# Isaac Gym must be imported before torch.
+from isaacgym import gymapi, gymtorch  # type: ignore
+import torch
 
-import argparse
 import math
-import sys
-from pathlib import Path
+from contextlib import contextmanager
+from dataclasses import dataclass
 
-# 路径
-_MOVE_PRO_ROOT = Path(__file__).resolve().parent
-_REPO_ROOT = _MOVE_PRO_ROOT.parent
-sys.path.insert(0, str(_REPO_ROOT))
-
-# BPP 决策（唯一的"新代码"）
-from move_pro.integrator import MoveProIntegrator, MoveProPlan     # noqa: E402
-from move_pro.config import MOVE_URDF as SHARED_MOVE_URDF, pallet_center_world  # noqa: E402
-
-# ---- 以下全部来自 move 项目 ----
-import move_pro.grab_test as _gt                                     # noqa: E402
-from move_pro.grab_test import (                                    # noqa: E402
-    SIM_PLACE_STAND_OFF, _target_world_center, MOVE_URDF,
-    build_offline_test3_scene, OfflineTest3Scene,
-)
-from move.planning import (                                         # noqa: E402
-    PALLET_SURFACE_Z, PALLET_SIZE,
-    TABLE_POSE, TABLE_SIZE,
-    BoxPlacement, EmptySpace, StackScene,
+import move.grab_test as _move_grab
+import move.tasks.grab_test_task as _grab_task
+from move.grab_test import OfflineTest3Scene, SIM_PLACE_STAND_OFF
+from move.planning import (
+    BOX_POSE,
+    PALLET_SIZE,
+    PALLET_SURFACE_Z,
+    PALLET_THICKNESS,
+    TABLE_POSE,
+    TABLE_SIZE,
+    BoxPlacement,
+    EmptySpace,
+    StackScene,
     pallet_center_near_table,
+    sample_root_trajectory,
+)
+from move.tasks.grab_test_task import (
+    ATTACH_AFTER_PICK_FRAMES,
+    FINAL_HOLD_FRAMES,
+    MOVE_APPROACH_FRAMES,
+    MOVE_LIFT_FRAMES,
+    MOVE_SETTLE_FRAMES,
+    PICK_SEGMENT_FRAMES,
+    PLACE_HANDOFF_FRAMES,
+    _actor_center,
+    _actor_yaw_pitch,
+    _add_vec,
+    _distance,
+    _expand_centers,
+    _expand_key_targets,
+    _grasp_center,
+    _grasp_theta,
+    _inverse_rotate_yaw_pitch,
+    _lock_mobile_dof_state,
+    _pose_from_dict,
+    _reorder_targets,
+    _rotate_yaw_pitch,
+    _set_actor_collision_filter,
+    _set_actor_root_pose,
+    _set_hand_box_collision_enabled,
+    _set_robot_dof_state,
+    _set_task_collision_filters,
+    _smooth_timeline_joint_steps,
+    _smoothstep,
+    _sub_vec,
+    _transform_local_point,
+)
+from move.tasks.move_test1 import (
+    _make_transform,
+    _set_color,
+    _set_shape_friction,
+    create_sim,
+    load_robot_asset,
 )
 
+from move_pro.config import BOX_MASS, MOVE_URDF
+from move_pro.integrator import BoxTask, MoveProIntegrator, MoveProPlan
 
-def _make_bpp_scene(target_world_center, box_size_m, stand_off, preset_boxes=()):
-    """为 BPP 目标构造与 build_offline_test3_scene 兼容的 OfflineTest3Scene。"""
-    sx, sy, sz = box_size_m
-    pc = pallet_center_near_table()
 
-    # 托盘局部坐标
-    lx = target_world_center[0] - (pc[0] - PALLET_SIZE[0] * 0.5)
-    ly = target_world_center[1] - (pc[1] - PALLET_SIZE[1] * 0.5)
-    lz = target_world_center[2] - PALLET_SURFACE_Z
-    target_min = (lx - sx * 0.5, ly - sy * 0.5, lz - sz * 0.5)
-    target_box = BoxPlacement("bpp_target", target_min, box_size_m)
+TimelineFrame = tuple[
+    str,
+    object,
+    torch.Tensor,
+    tuple[float, float, float],
+    float,
+]
 
-    # 虚拟底面（避免 grab_test 内部 max() 空序列报错）
+
+@dataclass
+class PreparedBox:
+    task: BoxTask
+    scene: OfflineTest3Scene
+    timeline: list[TimelineFrame]
+    source_pose: tuple[float, float, float]
+    pick_error: float
+    place_error: float
+
+
+def _source_pose(box_size: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (
+        BOX_POSE[0],
+        BOX_POSE[1],
+        TABLE_POSE[2] + TABLE_SIZE[2] * 0.5 + box_size[2] * 0.5,
+    )
+
+
+def _make_bpp_scene(
+    target_world_center: tuple[float, float, float],
+    box_size: tuple[float, float, float],
+    stand_off: float,
+    preset_boxes: tuple[BoxPlacement, ...],
+) -> OfflineTest3Scene:
+    sx, sy, sz = box_size
+    pallet_center = pallet_center_near_table()
+    local_center = (
+        target_world_center[0] - (pallet_center[0] - PALLET_SIZE[0] * 0.5),
+        target_world_center[1] - (pallet_center[1] - PALLET_SIZE[1] * 0.5),
+        target_world_center[2] - PALLET_SURFACE_Z,
+    )
+    target_min = (
+        local_center[0] - sx * 0.5,
+        local_center[1] - sy * 0.5,
+        local_center[2] - sz * 0.5,
+    )
+    target_box = BoxPlacement("bpp_target", target_min, box_size)
+
+    # The thin support is planning-only. The real pallet actor supplies the
+    # physical support in the shared simulation.
     floor_support = BoxPlacement(
         "_pallet_support",
         (0.0, 0.0, 0.0),
         (PALLET_SIZE[0], PALLET_SIZE[1], 0.001),
     )
-    stack_scene = StackScene(
-        pallet_center=pc,
+    stack = StackScene(
+        pallet_center=pallet_center,
         pallet_size=PALLET_SIZE,
         pallet_surface_z=PALLET_SURFACE_Z,
-        preset_boxes=(floor_support, *tuple(preset_boxes)),
+        preset_boxes=(floor_support, *preset_boxes),
         next_box=target_box,
         empty_spaces=(),
         selected_leaf=EmptySpace(target_box.min_corner, target_box.max_corner),
     )
-
-    final_pose, tmp_pose = _gt._solve_test3_root_pose(stack_scene, stand_off)
-    waypoints = _gt._build_test3_waypoints(stack_scene, final_pose, tmp_pose)
+    final_pose, tmp_pose = _move_grab._solve_test3_root_pose(stack, stand_off)
+    waypoints = _move_grab._build_test3_waypoints(stack, final_pose, tmp_pose)
     return OfflineTest3Scene(
-        name="bpp_target", stack_scene=stack_scene,
+        name="bpp_target",
+        stack_scene=stack,
         target_support_z=target_world_center[2] - sz * 0.5,
-        final_pose=final_pose, tmp_pose=tmp_pose, waypoints=waypoints,
+        final_pose=final_pose,
+        tmp_pose=tmp_pose,
+        waypoints=waypoints,
     )
 
 
-def run_single_box(
-    box_size_m,
-    target_world_center,
-    stand_off,
-    headless,
-    fast,
-    preset_boxes=(),
-    max_frames=0,
-):
-    """对单个箱子运行一次完整的 grab_test_task 仿真。
+@contextmanager
+def _dynamic_move_box(scene: OfflineTest3Scene, box_size, source_pose):
+    """Temporarily inject one variable-size box into move's planner."""
 
-    通过 monkey-patch build_offline_test3_scene 注入 BPP 目标。
-    所有仿真逻辑完全由 move 项目代码驱动。
-    """
-    # 1. 构造 BPP 场景
-    bpp_scene = _make_bpp_scene(
-        target_world_center,
-        box_size_m,
-        stand_off,
-        preset_boxes=preset_boxes,
+    original = (
+        _move_grab.BOX_SIZE,
+        _move_grab.BOX_POSE,
+        _move_grab.MOVE_URDF,
+        _move_grab.build_offline_test3_scene,
     )
-
-    # 2. Monkey-patch: 使 grab_test.run() 使用 BPP 目标
-    _original_build = _gt.build_offline_test3_scene
-    _original_size = _gt.BOX_SIZE
-    _original_pose = _gt.BOX_POSE
-    _original_urdf = _gt.MOVE_URDF
-    _gt.build_offline_test3_scene = lambda stand_off=stand_off: bpp_scene
-    _gt.BOX_SIZE = tuple(box_size_m)
-    _gt.BOX_POSE = (
-        _original_pose[0],
-        _original_pose[1],
-        TABLE_POSE[2] + TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
-    )
-    _gt.MOVE_URDF = SHARED_MOVE_URDF
-
+    _move_grab.BOX_SIZE = tuple(box_size)
+    _move_grab.BOX_POSE = tuple(source_pose)
+    _move_grab.MOVE_URDF = MOVE_URDF
+    _move_grab.build_offline_test3_scene = lambda stand_off=0.0: scene
     try:
-        # 3. 直接调用 grab_test_task.main() 的核心逻辑
-        #    （不做任何自定义重写）
-        _run_grab_test_task_single(
-            headless=headless,
-            stand_off=stand_off,
-            fast=fast,
-            max_frames=max_frames,
-        )
+        yield
     finally:
-        _gt.build_offline_test3_scene = _original_build
-        _gt.BOX_SIZE = _original_size
-        _gt.BOX_POSE = _original_pose
-        _gt.MOVE_URDF = _original_urdf
+        (
+            _move_grab.BOX_SIZE,
+            _move_grab.BOX_POSE,
+            _move_grab.MOVE_URDF,
+            _move_grab.build_offline_test3_scene,
+        ) = original
 
 
-def _run_grab_test_task_single(headless, stand_off, fast, max_frames=0):
-    """一次完整的 grab_test_task 仿真——代码直接来自 move/tasks/grab_test_task.py。
-
-    这是 grab_test_task.main() 的逐行复制，仅做必要的最小修改：
-    - 去掉 argparse（参数由外部传入）
-    - 添加 fast 模式支持
-    - 去掉多箱循环（由外层 control）
-    """
-    # ---- 以下代码直接来自 grab_test_task.main() ----
-
-    import numpy as np
-
-    import move.tasks.grab_test_task as _grab_task
-
-    _grab_task.BOX_SIZE = _gt.BOX_SIZE
-    _grab_task.BOX_POSE = _gt.BOX_POSE
-
-    from move.tasks.grab_test_task import (
-        _lerp_tensor, _smoothstep, _lerp_pose,
-        _smooth_timeline_joint_steps,
-        _expand_key_targets, _expand_centers,
-        _reorder_targets, _pose_from_dict,
-        _transform_local_point, _box_world_pose,
-        _set_actor_root_pose,
-        _set_task_collision_filters, _set_hand_box_collision_enabled,
-        _actor_center, _actor_yaw_pitch,
-        _quat_to_matrix, _rotate_yaw_pitch, _inverse_rotate_yaw_pitch,
-        _palm_center, _finger_dir, _grasp_center, _grasp_theta,
-        _add_vec, _sub_vec, _distance,
-        _dof_error_summary, _lock_mobile_dof_state, _set_robot_dof_state,
-        _create_actors,
-        PICK_SEGMENT_FRAMES, MOVE_SETTLE_FRAMES,
-        MOVE_APPROACH_FRAMES, MOVE_LIFT_FRAMES,
-        PLACE_HANDOFF_FRAMES, PLACE_SEGMENT_FRAMES, FINAL_HOLD_FRAMES,
-        ATTACH_AFTER_PICK_FRAMES,
+def _build_timeline(plan: dict[str, object], dof_names: list[str]) -> list[TimelineFrame]:
+    pick_targets = _reorder_targets(
+        plan["pick_targets"], list(plan["move_dof_names"]), dof_names
     )
-    from move.tasks.move_test1 import create_sim, load_robot_asset
+    place_targets = _reorder_targets(
+        plan["place_targets"], list(plan["place_dof_names"]), dof_names
+    )
+    release_target = _reorder_targets(
+        plan["release_target"], list(plan["place_dof_names"]), dof_names
+    )
+    move_approach_target = _reorder_targets(
+        plan["move_approach_target"], list(plan["move_dof_names"]), dof_names
+    )
+    move_lift_target = _reorder_targets(
+        plan["move_lift_target"], list(plan["move_dof_names"]), dof_names
+    )
 
-    # 调用 grab_test.run() 获取计划
-    report, plan = _gt.run(place_mode="move", stand_off=stand_off)
-    if not report.pick_feasible or not report.place_feasible:
-        print(f"  IK 不可行: pick={report.pick_max_error:.4f} place={report.place_max_error:.4f}")
-        return
+    pick_frames = _expand_key_targets(pick_targets, PICK_SEGMENT_FRAMES)
+    pick_centers = _expand_centers(
+        [tuple(center) for center in plan["pick_box_centers"]],
+        PICK_SEGMENT_FRAMES,
+    )
+    root_route = [
+        ("", _pose_from_dict(pose)) for _, pose in plan["root_route"]
+    ]
+    root_frames = []
+    for (_, start), (_, goal) in zip(root_route, root_route[1:]):
+        if start != goal:
+            root_frames.extend(sample_root_trajectory(start, goal))
+    if root_frames:
+        root_frames.extend([root_frames[-1]] * MOVE_SETTLE_FRAMES)
+    if not root_frames:
+        raise RuntimeError("move produced an empty root route")
 
-    scene = plan["scene"]
-    pick_targets = plan["pick_targets"]
-    place_targets = plan["place_targets"]
-    move_approach_target = plan["move_approach_target"]
-    move_lift_target = plan["move_lift_target"]
-    root_route = [("", _pose_from_dict(d)) for _, d in plan["root_route"]]
-    place_pose_path = plan.get("place_pose_path_world",
-        [(l, c, 0.0) for l, c in plan.get("place_center_path_world", [])])
-    place_center_path = [c for _, c, _ in place_pose_path]
-    target_center = _target_world_center(scene)
-    release_center = place_center_path[-1] if place_center_path else target_center
-    pre_place_center = plan.get("place_handoff_center_world",
-        place_center_path[0] if place_center_path else target_center)
+    pose_path = plan.get(
+        "place_pose_path_world",
+        [(label, center, 0.0) for label, center in plan["place_center_path_world"]],
+    )
+    target_center = _move_grab._target_world_center(plan["scene"])
+    pre_place = plan.get("place_handoff_center_world", pose_path[0][1])
+    carry_start = pick_centers[-1]
+    final_root = root_frames[-1]
+    carry_final = (
+        pre_place[0] - final_root.x,
+        pre_place[1] - final_root.y,
+        pre_place[2] - final_root.z,
+    )
+    carry_approach = (
+        carry_final[0],
+        carry_final[1],
+        float(plan.get("move_approach_box_center_z", target_center[2]))
+        - final_root.z,
+    )
+    approach_theta = float(plan.get("move_approach_box_theta", 0.0))
+    preplace_theta = float(
+        plan.get("move_preplace_box_theta", approach_theta)
+    )
 
-    # 创建 Isaac Gym
-    gym = gymapi.acquire_gym()
-    sim = create_sim(gym)
-    if sim is None:
-        raise RuntimeError("Isaac Gym failed to create the simulation")
-    plane = gymapi.PlaneParams(); plane.normal = gymapi.Vec3(0, 0, 1)
-    gym.add_ground(sim, plane)
-    robot_asset = load_robot_asset(gym, sim)
-    if robot_asset is None:
-        gym.destroy_sim(sim)
-        raise RuntimeError(f"failed to load robot URDF from {SHARED_MOVE_URDF}")
-    dof_names = list(gym.get_asset_dof_names(robot_asset))
-    if not dof_names:
-        gym.destroy_sim(sim)
-        raise RuntimeError(
-            f"robot asset from {SHARED_MOVE_URDF} contains no active DOFs"
+    move_q = []
+    move_centers = []
+    move_thetas = []
+    for root in root_frames:
+        move_q.append(pick_targets[-1])
+        move_centers.append(_transform_local_point(root, carry_start))
+        move_thetas.append(0.0)
+    for index in range(1, MOVE_APPROACH_FRAMES + 1):
+        alpha = _smoothstep(index / MOVE_APPROACH_FRAMES)
+        move_q.append(
+            pick_targets[-1] * (1.0 - alpha)
+            + move_approach_target * alpha
+        )
+        local = tuple(
+            carry_start[axis] * (1.0 - alpha)
+            + carry_approach[axis] * alpha
+            for axis in range(3)
+        )
+        move_centers.append(_transform_local_point(final_root, local))
+        move_thetas.append(approach_theta * alpha)
+    for index in range(1, MOVE_LIFT_FRAMES + 1):
+        alpha = _smoothstep(index / MOVE_LIFT_FRAMES)
+        move_q.append(
+            move_approach_target * (1.0 - alpha) + move_lift_target * alpha
+        )
+        local = tuple(
+            carry_approach[axis] * (1.0 - alpha)
+            + carry_final[axis] * alpha
+            for axis in range(3)
+        )
+        move_centers.append(_transform_local_point(final_root, local))
+        move_thetas.append(
+            approach_theta * (1.0 - alpha) + preplace_theta * alpha
         )
 
-    # Reorder targets
-    pick_targets = _reorder_targets(pick_targets, list(plan["move_dof_names"]), dof_names)
-    place_targets = _reorder_targets(place_targets, list(plan["place_dof_names"]), dof_names)
-    release_target = _reorder_targets(plan["release_target"], list(plan["place_dof_names"]), dof_names)
-    move_approach_target = _reorder_targets(move_approach_target, list(plan["move_dof_names"]), dof_names)
-    move_lift_target = _reorder_targets(move_lift_target, list(plan["move_dof_names"]), dof_names)
+    timeline: list[TimelineFrame] = []
+    for q, center in zip(pick_frames, pick_centers):
+        timeline.append(("pick", _move_grab.Pose(0, 0, 0, 0), q, center, 0.0))
+    all_roots = list(root_frames) + [final_root] * (
+        MOVE_APPROACH_FRAMES + MOVE_LIFT_FRAMES
+    )
+    for root, q, center, theta in zip(
+        all_roots, move_q, move_centers, move_thetas
+    ):
+        timeline.append(("move", root, q, center, theta))
 
-    # Expand pick
-    pick_dof_frames = _expand_key_targets(pick_targets, PICK_SEGMENT_FRAMES)
-    pick_centers = [tuple(c) for c in plan["pick_box_centers"]]
-    pick_box_frames = _expand_centers(pick_centers, PICK_SEGMENT_FRAMES)
+    dense_place_targets = [
+        place_targets[index].clone() for index in range(place_targets.shape[0])
+    ]
+    if dense_place_targets:
+        start_q = move_q[-1]
+        start_center = move_centers[-1]
+        start_theta = move_thetas[-1]
+        first_center, first_theta = pose_path[0][1], pose_path[0][2]
+        for index in range(1, PLACE_HANDOFF_FRAMES + 1):
+            alpha = _smoothstep(index / PLACE_HANDOFF_FRAMES)
+            center = tuple(
+                start_center[axis] * (1.0 - alpha)
+                + first_center[axis] * alpha
+                for axis in range(3)
+            )
+            timeline.append(
+                (
+                    "place_handoff",
+                    final_root,
+                    start_q * (1.0 - alpha)
+                    + dense_place_targets[0] * alpha,
+                    center,
+                    start_theta * (1.0 - alpha) + first_theta * alpha,
+                )
+            )
+    for q, (_, center, theta) in zip(dense_place_targets, pose_path):
+        timeline.append(("place", final_root, q, center, theta))
 
-    # Root frames
-    root_frames_list = []
-    for wp_start, wp_goal in zip(root_route, root_route[1:] if len(root_route) > 1 else ([], [])):
-        if wp_start[1] != wp_goal[1]:
-            from move_pro.planning import sample_root_trajectory
-            root_frames_list.extend(sample_root_trajectory(wp_start[1], wp_goal[1]))
-    root_frames_list += [root_frames_list[-1]] * MOVE_SETTLE_FRAMES if root_frames_list else []
-
-    # Move frames
-    move_dof_frames, move_box_frames, move_box_thetas = [], [], []
-    carry_start = pick_box_frames[-1] if pick_box_frames else (0, 0, 0)
-    final_root = root_frames_list[-1] if root_frames_list else None
-    if final_root is None:
-        gym.destroy_sim(sim)
-        return
-    carry_local_final = (
-        pre_place_center[0] - final_root.x,
-        pre_place_center[1] - final_root.y,
-        pre_place_center[2] - final_root.z)
-    carry_local_approach = (
-        carry_local_final[0], carry_local_final[1],
-        float(plan.get("move_approach_box_center_z", target_center[2])) - final_root.z)
-    ma_theta = float(plan.get("move_approach_box_theta", 0.0))
-    mp_theta = float(plan.get("move_preplace_box_theta", ma_theta))
-
-    for _, rp in enumerate(root_frames_list):
-        move_dof_frames.append(pick_targets[-1])
-        move_box_frames.append(_transform_local_point(rp, carry_start))
-        move_box_thetas.append(0.0)
-    for i in range(1, MOVE_APPROACH_FRAMES + 1):
-        a = _smoothstep(i / MOVE_APPROACH_FRAMES)
-        move_dof_frames.append(_lerp_tensor(pick_targets[-1], move_approach_target, a))
-        cl = tuple(carry_start[j]*(1-a)+carry_local_approach[j]*a for j in range(3))
-        move_box_frames.append(_transform_local_point(final_root, cl))
-        move_box_thetas.append(ma_theta * a)
-    for i in range(1, MOVE_LIFT_FRAMES + 1):
-        a = _smoothstep(i / MOVE_LIFT_FRAMES)
-        move_dof_frames.append(_lerp_tensor(move_approach_target, move_lift_target, a))
-        cl = tuple(carry_local_approach[j]*(1-a)+carry_local_final[j]*a for j in range(3))
-        move_box_frames.append(_transform_local_point(final_root, cl))
-        move_box_thetas.append(ma_theta*(1-a)+mp_theta*a)
-
-    # Place frames
-    place_dof_frames = [place_targets[i].clone() for i in range(place_targets.shape[0])]
-    place_pose_labeled = place_pose_path
-
-    # ---- 构建时间线（直接来自 grab_test_task.main()） ----
-    timeline = []
-    for q, center in zip(pick_dof_frames, pick_box_frames):
-        timeline.append(("pick", _gt.Pose(0, 0, 0, 0), q, center, 0.0))
-
-    all_root_poses = list(root_frames_list) + [final_root]*(MOVE_APPROACH_FRAMES+MOVE_LIFT_FRAMES)
-    for rp, q, c, th in zip(all_root_poses, move_dof_frames, move_box_frames, move_box_thetas):
-        timeline.append(("move", rp, q, c, th))
-
-    if place_dof_frames:
-        me_q = move_dof_frames[-1] if move_dof_frames else pick_targets[-1]
-        me_c = move_box_frames[-1] if move_box_frames else carry_start
-        me_th = move_box_thetas[-1] if move_box_thetas else 0.0
-        fc, fth = place_pose_labeled[0][1], place_pose_labeled[0][2]
-        for i in range(1, PLACE_HANDOFF_FRAMES + 1):
-            a = _smoothstep(i / PLACE_HANDOFF_FRAMES)
-            c = tuple(me_c[j]*(1-a)+fc[j]*a for j in range(3))
-            timeline.append(("place_handoff", final_root,
-                           _lerp_tensor(me_q, place_dof_frames[0], a),
-                           c, me_th*(1-a)+fth*a))
-    for q, (_, c, th) in zip(place_dof_frames, place_pose_labeled):
-        timeline.append(("place", final_root, q, c, th))
-
+    release_center = pose_path[-1][1]
     timeline.append(("release", final_root, release_target, release_center, 0.0))
-    for _ in range(FINAL_HOLD_FRAMES):
-        timeline.append(("post_release", final_root, release_target, release_center, 0.0))
-    timeline = _smooth_timeline_joint_steps(timeline, max_joint_step=0.02)
+    timeline.extend(
+        ("post_release", final_root, release_target, release_center, 0.0)
+        for _ in range(FINAL_HOLD_FRAMES)
+    )
+    return _smooth_timeline_joint_steps(timeline, max_joint_step=0.02)
 
-    # ---- 创建场景（直接来自 grab_test_task.main()） ----
-    env = gym.create_env(sim, gymapi.Vec3(-2, -2, 0), gymapi.Vec3(7, 6.5, 2.5), 1)
-    robot, source = _create_actors(gym, sim, env, scene, robot_asset)
 
-    props = gym.get_actor_dof_properties(env, robot)
-    props["driveMode"].fill(gymapi.DOF_MODE_POS)
-    for i, name in enumerate(dof_names):
+def _prepare_boxes(
+    plan: MoveProPlan,
+    dof_names: list[str],
+    stand_off: float,
+) -> list[PreparedBox]:
+    prepared = []
+    preset_boxes: list[BoxPlacement] = []
+    pallet_center = pallet_center_near_table()
+    for task in plan.box_tasks:
+        if not task.placement.feasible:
+            continue
+        box_size = task.world_size
+        source_pose = _source_pose(box_size)
+        scene = _make_bpp_scene(
+            task.world_target,
+            box_size,
+            stand_off,
+            tuple(preset_boxes),
+        )
+        with _dynamic_move_box(scene, box_size, source_pose):
+            report, move_plan = _move_grab.run(
+                place_mode="move", stand_off=stand_off
+            )
+        if not report.pick_feasible or not report.place_feasible:
+            raise RuntimeError(
+                f"IK infeasible for box {task.index}: "
+                f"pick={report.pick_max_error:.4f}, "
+                f"place={report.place_max_error:.4f}"
+            )
+        prepared.append(
+            PreparedBox(
+                task=task,
+                scene=scene,
+                timeline=_build_timeline(move_plan, dof_names),
+                source_pose=source_pose,
+                pick_error=report.pick_max_error,
+                place_error=report.place_max_error,
+            )
+        )
+        target = task.world_target
+        preset_boxes.append(
+            BoxPlacement(
+                f"placed_{task.index}",
+                (
+                    target[0]
+                    - pallet_center[0]
+                    + PALLET_SIZE[0] * 0.5
+                    - box_size[0] * 0.5,
+                    target[1]
+                    - pallet_center[1]
+                    + PALLET_SIZE[1] * 0.5
+                    - box_size[1] * 0.5,
+                    target[2]
+                    - PALLET_SURFACE_Z
+                    - box_size[2] * 0.5,
+                ),
+                box_size,
+            )
+        )
+    return prepared
+
+
+BOX_COLORS = (
+    (0.92, 0.18, 0.08),
+    (0.95, 0.52, 0.05),
+    (0.95, 0.78, 0.08),
+    (0.28, 0.72, 0.22),
+    (0.08, 0.62, 0.72),
+    (0.12, 0.38, 0.88),
+    (0.48, 0.24, 0.82),
+    (0.82, 0.20, 0.62),
+)
+
+
+def _parked_pose(index: int, box_size) -> tuple[float, float, float]:
+    column = index % 8
+    row = index // 8
+    return (-2.0 - column * 0.55, -2.0 - row * 0.55, box_size[2] * 0.5)
+
+
+def _create_shared_scene(gym, sim, env, robot_asset, prepared):
+    robot = gym.create_actor(
+        env,
+        robot_asset,
+        _make_transform(0.0, 0.0, 0.0),
+        "move_pro_robot",
+        0,
+        1,
+    )
+    fixed = gymapi.AssetOptions()
+    fixed.fix_base_link = True
+    table_asset = gym.create_box(sim, *TABLE_SIZE, fixed)
+    pallet_asset = gym.create_box(
+        sim, PALLET_SIZE[0], PALLET_SIZE[1], PALLET_THICKNESS, fixed
+    )
+    table = gym.create_actor(
+        env, table_asset, _make_transform(*TABLE_POSE), "table", 0, 0
+    )
+    pallet_center = pallet_center_near_table()
+    pallet = gym.create_actor(
+        env,
+        pallet_asset,
+        _make_transform(
+            pallet_center[0],
+            pallet_center[1],
+            PALLET_SURFACE_Z - PALLET_THICKNESS * 0.5,
+        ),
+        "pallet",
+        0,
+        0,
+    )
+
+    boxes = []
+    for index, item in enumerate(prepared):
+        sx, sy, sz = item.task.world_size
+        options = gymapi.AssetOptions()
+        options.density = BOX_MASS / (sx * sy * sz)
+        asset = gym.create_box(sim, sx, sy, sz, options)
+        box = gym.create_actor(
+            env,
+            asset,
+            _make_transform(*_parked_pose(index, item.task.world_size)),
+            f"move_pro_box_{item.task.index:03d}",
+            0,
+            0,
+        )
+        boxes.append(box)
+        _set_color(gym, env, box, BOX_COLORS[index % len(BOX_COLORS)])
+        _set_shape_friction(
+            gym, env, box, 8.0, rolling_friction=0.08, torsion_friction=0.08
+        )
+
+    _set_color(gym, env, table, (0.88, 0.88, 0.88))
+    _set_color(gym, env, pallet, (0.15, 0.55, 0.45))
+    _set_shape_friction(
+        gym, env, robot, 6.0, rolling_friction=0.05, torsion_friction=0.05
+    )
+    _set_shape_friction(gym, env, table, 2.5)
+    _set_shape_friction(gym, env, pallet, 1.4)
+    return robot, boxes
+
+
+def _configure_robot(gym, env, robot, dof_names):
+    properties = gym.get_actor_dof_properties(env, robot)
+    properties["driveMode"].fill(gymapi.DOF_MODE_POS)
+    for index, name in enumerate(dof_names):
         if "xhand_" in name:
-            props["stiffness"][i] = 120.0; props["damping"][i] = 12.0
-            props["effort"][i] = max(float(props["effort"][i]), 35.0)
+            properties["stiffness"][index] = 120.0
+            properties["damping"][index] = 12.0
+            properties["effort"][index] = max(
+                float(properties["effort"][index]), 35.0
+            )
         else:
-            props["stiffness"][i] = 520.0; props["damping"][i] = 52.0
-            props["effort"][i] = max(float(props["effort"][i]), 180.0)
-    gym.set_actor_dof_properties(env, robot, props)
+            properties["stiffness"][index] = 520.0
+            properties["damping"][index] = 52.0
+            properties["effort"][index] = max(
+                float(properties["effort"][index]), 180.0
+            )
+    gym.set_actor_dof_properties(env, robot, properties)
 
-    dof_state = gym.get_actor_dof_states(env, robot, gymapi.STATE_ALL)
-    dof_state["pos"] = timeline[0][2].numpy()
-    dof_state["vel"].fill(0.0)
-    gym.set_actor_dof_states(env, robot, dof_state, gymapi.STATE_ALL)
-    gym.set_actor_dof_position_targets(env, robot, timeline[0][2].numpy())
 
-    gym.prepare_sim(sim)
-    root_states = gymtorch.wrap_tensor(gym.acquire_actor_root_state_tensor(sim))
-    robot_idx = gym.get_actor_index(env, robot, gymapi.DOMAIN_SIM)
-    source_idx = gym.get_actor_index(env, source, gymapi.DOMAIN_SIM)
+def _play_box(
+    gym,
+    sim,
+    env,
+    robot,
+    box,
+    root_states,
+    robot_index: int,
+    box_index: int,
+    dof_names: list[str],
+    item: PreparedBox,
+    viewer,
+    fast: bool,
+    global_frame: int,
+    max_frames: int,
+) -> tuple[int, bool]:
+    _set_actor_root_pose(
+        gym, sim, root_states, box_index, item.source_pose, 0.0, 0.0
+    )
+    _set_task_collision_filters(gym, env, robot, box)
+    _set_hand_box_collision_enabled(gym, env, robot, box, enabled=True)
 
-    viewer = None
-    if not headless:
-        viewer = gym.create_viewer(sim, gymapi.CameraProperties())
-        if viewer:
-            gym.viewer_camera_look_at(viewer, env,
-                gymapi.Vec3(2.0, -2.2, 1.45), gymapi.Vec3(0.0, 0.0, 0.80))
+    attached = False
+    released = False
+    attach_offset = None
+    attach_yaw_offset = 0.0
+    attach_theta_offset = 0.0
+    for local_frame, (phase, root, q, _center, _theta) in enumerate(
+        item.timeline
+    ):
+        frame = global_frame + local_frame
+        if max_frames > 0 and frame >= max_frames:
+            return frame, False
+        if viewer is not None and gym.query_viewer_has_closed(viewer):
+            return frame, False
 
-    print(f"  pick={report.pick_max_error:.4f} place={report.place_max_error:.4f} "
-          f"target=({target_center[0]:.3f},{target_center[1]:.3f},{target_center[2]:.3f}) "
-          f"frames={len(timeline)}")
+        if (
+            not attached
+            and not released
+            and phase == "pick"
+            and local_frame >= ATTACH_AFTER_PICK_FRAMES
+        ):
+            attached = True
+            actual_center = _actor_center(gym, env, box)
+            actual_yaw, actual_pitch = _actor_yaw_pitch(gym, env, box)
+            grasp_center = _grasp_center(gym, env, robot)
+            grasp_theta = _grasp_theta(gym, env, robot, root.yaw)
+            attach_offset = _inverse_rotate_yaw_pitch(
+                _sub_vec(actual_center, grasp_center),
+                root.yaw,
+                grasp_theta,
+            )
+            attach_yaw_offset = actual_yaw - root.yaw
+            attach_theta_offset = actual_pitch - grasp_theta
+            _set_hand_box_collision_enabled(
+                gym, env, robot, box, enabled=False
+            )
+            print(
+                f"move_pro_attach box={item.task.index} frame={frame} "
+                f"offset=({attach_offset[0]:.3f},"
+                f"{attach_offset[1]:.3f},{attach_offset[2]:.3f})"
+            )
 
-    # ---- 仿真主循环（直接来自 grab_test_task.main()） ----
-    frame = 0; attached = False; released = False
-    attach_off = None; attach_yaw_off = 0.0; attach_th_off = 0.0
+        if attached and not released and phase == "release":
+            released = True
+            attached = False
+            actual = _actor_center(gym, env, box)
+            print(
+                f"move_pro_release box={item.task.index} frame={frame} "
+                f"actual=({actual[0]:.3f},{actual[1]:.3f},{actual[2]:.3f})"
+            )
 
-    try:
-        while viewer is None or not gym.query_viewer_has_closed(viewer):
-            idx = min(frame, len(timeline)-1)
-            phase, rp, q, bc, bt = timeline[idx]
+        gym.refresh_actor_root_state_tensor(sim)
+        _set_actor_root_pose(
+            gym,
+            sim,
+            root_states,
+            robot_index,
+            (root.x, root.y, root.z),
+            root.yaw,
+        )
+        _set_robot_dof_state(gym, env, robot, q)
+        if phase == "pick":
+            _lock_mobile_dof_state(gym, env, robot, dof_names)
+        gym.set_actor_dof_position_targets(env, robot, q.numpy())
+        gym.simulate(sim)
+        gym.fetch_results(sim, True)
 
-            # Attach
-            if not attached and not released and frame >= ATTACH_AFTER_PICK_FRAMES:
-                attached = True
-                ac = _actor_center(gym, env, source)
-                ay, ap = _actor_yaw_pitch(gym, env, source)
-                gc = _grasp_center(gym, env, robot)
-                gt_ = _grasp_theta(gym, env, robot, rp.yaw)
-                attach_off = _inverse_rotate_yaw_pitch(_sub_vec(ac, gc), rp.yaw, gt_)
-                attach_yaw_off = ay - rp.yaw; attach_th_off = ap - gt_
-                _set_hand_box_collision_enabled(gym, env, robot, source, enabled=False)
-                print(f"  [frame {frame}] ATTACH offset=({attach_off[0]:.3f},{attach_off[1]:.3f},{attach_off[2]:.3f})")
-
-            # Release
-            if attached and not released and phase == "release":
-                gym.refresh_actor_root_state_tensor(sim)
-                released = True; attached = False
-                ar = _actor_center(gym, env, source)
-                print(f"  [frame {frame}] RELEASE at=({ar[0]:.3f},{ar[1]:.3f},{ar[2]:.3f})")
-
-            # Robot DOF + root
+        if attached and attach_offset is not None:
             gym.refresh_actor_root_state_tensor(sim)
-            _set_actor_root_pose(gym, sim, root_states, robot_idx, (rp.x, rp.y, rp.z), rp.yaw)
-            _set_robot_dof_state(gym, env, robot, q)
-            if phase == "pick":
-                _lock_mobile_dof_state(gym, env, robot, dof_names)
-            gym.set_actor_dof_position_targets(env, robot, q.numpy())
+            grasp_center = _grasp_center(gym, env, robot)
+            grasp_theta = _grasp_theta(gym, env, robot, root.yaw)
+            center = _add_vec(
+                grasp_center,
+                _rotate_yaw_pitch(attach_offset, root.yaw, grasp_theta),
+            )
+            _set_actor_root_pose(
+                gym,
+                sim,
+                root_states,
+                box_index,
+                center,
+                root.yaw + attach_yaw_offset,
+                grasp_theta + attach_theta_offset,
+            )
 
-            gym.simulate(sim)
-            gym.fetch_results(sim, True)
+        if viewer is not None:
+            gym.step_graphics(sim)
+            gym.draw_viewer(viewer, sim, True)
+            if not fast:
+                gym.sync_frame_time(sim)
 
-            # Kinematic attach
-            if attached and attach_off is not None:
-                gym.refresh_actor_root_state_tensor(sim)
-                gc = _grasp_center(gym, env, robot)
-                gt_ = _grasp_theta(gym, env, robot, rp.yaw)
-                ac = _add_vec(gc, _rotate_yaw_pitch(attach_off, rp.yaw, gt_))
-                ath = gt_ + attach_th_off
-                _set_actor_root_pose(gym, sim, root_states, source_idx,
-                                     ac, rp.yaw+attach_yaw_off, ath)
+        if local_frame % 240 == 0:
+            actual = _actor_center(gym, env, box)
+            print(
+                f"frame={frame} box={item.task.index} phase={phase} "
+                f"actual=({actual[0]:.2f},{actual[1]:.2f},{actual[2]:.2f}) "
+                f"attached={attached} released={released}"
+            )
 
-            if viewer:
-                gym.step_graphics(sim)
-                gym.draw_viewer(viewer, sim, True)
-                if not fast:
-                    gym.sync_frame_time(sim)
+    actual = _actor_center(gym, env, box)
+    error = _distance(actual, item.task.world_target)
+    _set_actor_collision_filter(gym, env, box, 0)
+    print(
+        f"move_pro_box_result box={item.task.index} "
+        f"actual=({actual[0]:.3f},{actual[1]:.3f},{actual[2]:.3f}) "
+        f"target=({item.task.world_target[0]:.3f},"
+        f"{item.task.world_target[1]:.3f},{item.task.world_target[2]:.3f}) "
+        f"error={error:.4f}"
+    )
+    return global_frame + len(item.timeline), True
 
-            if frame % 120 == 0:
-                ab = _actor_center(gym, env, source)
-                print(f"  frame={frame} phase={phase} box=({ab[0]:.2f},{ab[1]:.2f},{ab[2]:.2f}) "
-                      f"attached={attached} released={released}")
-
-            frame += 1
-            if frame >= len(timeline) or (max_frames > 0 and frame >= max_frames):
-                break
-    finally:
-        ab = _actor_center(gym, env, source)
-        err = _distance(ab, target_center)
-        print(f"  完成: box=({ab[0]:.3f},{ab[1]:.3f},{ab[2]:.3f}) "
-              f"target_err={err:.3f} attached={attached} released={released}")
-        if viewer:
-            gym.destroy_viewer(viewer)
-        gym.destroy_sim(sim)
-
-
-# ---------------------------------------------------------------------------
-# 多箱仿真（唯一真正的新代码）
-# ---------------------------------------------------------------------------
 
 class MoveProSimulator:
-    """智能码垛仿真器 — 每个箱子独立运行一次完整的 grab_test_task 流程。"""
+    """Run all PCT-selected boxes in one persistent move simulation."""
 
-    def __init__(self, method="LSAH", container_size=(10, 10, 16),
-                 stand_off=SIM_PLACE_STAND_OFF):
-        self.method = method
-        self.container_size = container_size
+    def __init__(
+        self,
+        method: str = "LSAH",
+        container_size=(10, 10, 16),
+        stand_off: float = SIM_PLACE_STAND_OFF,
+    ):
         self.stand_off = stand_off
-        self.integrator = MoveProIntegrator(method=method, container_size=container_size,
-                                            stand_off=stand_off)
+        self.integrator = MoveProIntegrator(
+            method=method,
+            container_size=container_size,
+            stand_off=stand_off,
+        )
 
     def run(
         self,
@@ -429,55 +634,112 @@ class MoveProSimulator:
         fast=False,
         max_frames=0,
     ):
-        # 1. BPP 决策
-        print("BPP 决策中 ...")
-        plan = self.integrator.build_plan(box_sequence, compute_ik=False,
-                                          sizes_are_pct=sizes_are_pct)
+        plan = self.integrator.build_plan(
+            box_sequence, compute_ik=False, sizes_are_pct=sizes_are_pct
+        )
         print(plan.summary())
 
-        placed = 0
-        preset_boxes = []
-        for bt in plan.box_tasks:
-            if not bt.placement.feasible:
-                continue
+        gym = gymapi.acquire_gym()
+        sim = create_sim(gym)
+        if sim is None:
+            raise RuntimeError("Isaac Gym failed to create the simulation")
+        viewer = None
+        try:
+            plane = gymapi.PlaneParams()
+            plane.normal = gymapi.Vec3(0, 0, 1)
+            gym.add_ground(sim, plane)
+            robot_asset = load_robot_asset(gym, sim)
+            if robot_asset is None:
+                raise RuntimeError(f"failed to load robot URDF from {MOVE_URDF}")
+            dof_names = list(gym.get_asset_dof_names(robot_asset))
+            if not dof_names:
+                raise RuntimeError("robot asset contains no active DOFs")
 
-            box_sz = bt.world_size
-            target = bt.world_target
+            print("Preparing move IK plans for all boxes...")
+            prepared = _prepare_boxes(plan, dof_names, self.stand_off)
+            if not prepared:
+                raise RuntimeError("PCT produced no executable boxes")
 
-            print(f"\n{'='*50}")
-            print(f"  箱#{bt.index}: {bt.pct_size} → world({target[0]:.3f},{target[1]:.3f},{target[2]:.3f})")
-            print(f"{'='*50}")
+            env = gym.create_env(
+                sim,
+                gymapi.Vec3(-8.0, -5.0, 0.0),
+                gymapi.Vec3(7.0, 7.0, 3.0),
+                1,
+            )
+            robot, boxes = _create_shared_scene(
+                gym, sim, env, robot_asset, prepared
+            )
+            _configure_robot(gym, env, robot, dof_names)
+            first_q = prepared[0].timeline[0][2]
+            _set_robot_dof_state(gym, env, robot, first_q)
+            gym.set_actor_dof_position_targets(env, robot, first_q.numpy())
 
-            try:
-                run_single_box(
-                    box_sz,
-                    target,
-                    self.stand_off,
-                    headless,
+            gym.prepare_sim(sim)
+            root_states = gymtorch.wrap_tensor(
+                gym.acquire_actor_root_state_tensor(sim)
+            )
+            robot_index = gym.get_actor_index(
+                env, robot, gymapi.DOMAIN_SIM
+            )
+            box_indices = [
+                gym.get_actor_index(env, box, gymapi.DOMAIN_SIM)
+                for box in boxes
+            ]
+
+            if not headless:
+                viewer = gym.create_viewer(sim, gymapi.CameraProperties())
+                if viewer is None:
+                    raise RuntimeError("failed to create Isaac Gym viewer")
+                pallet_center = pallet_center_near_table()
+                gym.viewer_camera_look_at(
+                    viewer,
+                    env,
+                    gymapi.Vec3(
+                        pallet_center[0] + 1.8,
+                        pallet_center[1] - 2.2,
+                        1.7,
+                    ),
+                    gymapi.Vec3(
+                        pallet_center[0], pallet_center[1], 0.65
+                    ),
+                )
+
+            global_frame = 0
+            completed = 0
+            for item, box, box_index in zip(
+                prepared, boxes, box_indices
+            ):
+                print(
+                    f"\nmove_pro_start_box box={item.task.index} "
+                    f"size={item.task.world_size} "
+                    f"target={item.task.world_target} "
+                    f"ik=({item.pick_error:.4f},{item.place_error:.4f})"
+                )
+                global_frame, keep_running = _play_box(
+                    gym,
+                    sim,
+                    env,
+                    robot,
+                    box,
+                    root_states,
+                    robot_index,
+                    box_index,
+                    dof_names,
+                    item,
+                    viewer,
                     fast,
-                    preset_boxes=tuple(preset_boxes),
-                    max_frames=max_frames,
+                    global_frame,
+                    max_frames,
                 )
-                placed += 1
-                pc = pallet_center_near_table()
-                preset_boxes.append(
-                    BoxPlacement(
-                        f"placed_{bt.index}",
-                        (
-                            target[0] - pc[0] + PALLET_SIZE[0] * 0.5 - box_sz[0] * 0.5,
-                            target[1] - pc[1] + PALLET_SIZE[1] * 0.5 - box_sz[1] * 0.5,
-                            target[2] - PALLET_SURFACE_Z - box_sz[2] * 0.5,
-                        ),
-                        box_sz,
-                    )
-                )
-            except Exception as e:
-                import traceback
-                print(f"  箱#{bt.index} 仿真异常: {e}")
-                traceback.print_exc()
-                raise RuntimeError(
-                    f"simulation stopped after box {bt.index} failed"
-                ) from e
-
-        print(f"\n全部完成: {placed}/{plan.total_boxes} 箱")
-        return plan
+                if not keep_running:
+                    break
+                completed += 1
+            print(
+                f"move_pro_result completed={completed}/{len(prepared)} "
+                f"frames={global_frame}"
+            )
+            return plan
+        finally:
+            if viewer is not None:
+                gym.destroy_viewer(viewer)
+            gym.destroy_sim(sim)
