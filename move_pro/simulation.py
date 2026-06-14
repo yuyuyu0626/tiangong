@@ -15,6 +15,7 @@ import torch
 import math
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Tuple
 
 import move.grab_test as _move_grab
 import move.tasks.grab_test_task as _grab_task
@@ -75,11 +76,11 @@ from move_pro.config import BOX_MASS, MOVE_URDF
 from move_pro.integrator import BoxTask, MoveProIntegrator, MoveProPlan
 
 
-TimelineFrame = tuple[
+TimelineFrame = Tuple[
     str,
     object,
     torch.Tensor,
-    tuple[float, float, float],
+    Tuple[float, float, float],
     float,
 ]
 
