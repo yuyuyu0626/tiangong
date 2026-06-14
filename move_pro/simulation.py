@@ -29,7 +29,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 # BPP 决策（唯一的"新代码"）
 from move_pro.integrator import MoveProIntegrator, MoveProPlan     # noqa: E402
-from move_pro.config import pallet_center_world                     # noqa: E402
+from move_pro.config import MOVE_URDF as SHARED_MOVE_URDF, pallet_center_world  # noqa: E402
 
 # ---- 以下全部来自 move 项目 ----
 import move_pro.grab_test as _gt                                     # noqa: E402
@@ -39,6 +39,7 @@ from move_pro.grab_test import (                                    # noqa: E402
 )
 from move.planning import (                                         # noqa: E402
     PALLET_SURFACE_Z, PALLET_SIZE,
+    TABLE_POSE, TABLE_SIZE,
     BoxPlacement, EmptySpace, StackScene,
     pallet_center_near_table,
 )
@@ -107,13 +108,15 @@ def run_single_box(
     _original_build = _gt.build_offline_test3_scene
     _original_size = _gt.BOX_SIZE
     _original_pose = _gt.BOX_POSE
+    _original_urdf = _gt.MOVE_URDF
     _gt.build_offline_test3_scene = lambda stand_off=stand_off: bpp_scene
     _gt.BOX_SIZE = tuple(box_size_m)
     _gt.BOX_POSE = (
         _original_pose[0],
         _original_pose[1],
-        _gt.TABLE_POSE[2] + _gt.TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
+        TABLE_POSE[2] + TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
     )
+    _gt.MOVE_URDF = SHARED_MOVE_URDF
 
     try:
         # 3. 直接调用 grab_test_task.main() 的核心逻辑
@@ -128,6 +131,7 @@ def run_single_box(
         _gt.build_offline_test3_scene = _original_build
         _gt.BOX_SIZE = _original_size
         _gt.BOX_POSE = _original_pose
+        _gt.MOVE_URDF = _original_urdf
 
 
 def _run_grab_test_task_single(headless, stand_off, fast, max_frames=0):
@@ -142,12 +146,12 @@ def _run_grab_test_task_single(headless, stand_off, fast, max_frames=0):
 
     import numpy as np
 
-    import move_pro.tasks.grab_test_task as _grab_task
+    import move.tasks.grab_test_task as _grab_task
 
     _grab_task.BOX_SIZE = _gt.BOX_SIZE
     _grab_task.BOX_POSE = _gt.BOX_POSE
 
-    from move_pro.tasks.grab_test_task import (
+    from move.tasks.grab_test_task import (
         _lerp_tensor, _smoothstep, _lerp_pose,
         _smooth_timeline_joint_steps,
         _expand_key_targets, _expand_centers,
@@ -166,7 +170,7 @@ def _run_grab_test_task_single(headless, stand_off, fast, max_frames=0):
         PLACE_HANDOFF_FRAMES, PLACE_SEGMENT_FRAMES, FINAL_HOLD_FRAMES,
         ATTACH_AFTER_PICK_FRAMES,
     )
-    from move_pro.tasks.move_test1 import create_sim, load_robot_asset
+    from move.tasks.move_test1 import create_sim, load_robot_asset
 
     # 调用 grab_test.run() 获取计划
     report, plan = _gt.run(place_mode="move", stand_off=stand_off)
@@ -191,10 +195,20 @@ def _run_grab_test_task_single(headless, stand_off, fast, max_frames=0):
     # 创建 Isaac Gym
     gym = gymapi.acquire_gym()
     sim = create_sim(gym)
+    if sim is None:
+        raise RuntimeError("Isaac Gym failed to create the simulation")
     plane = gymapi.PlaneParams(); plane.normal = gymapi.Vec3(0, 0, 1)
     gym.add_ground(sim, plane)
     robot_asset = load_robot_asset(gym, sim)
+    if robot_asset is None:
+        gym.destroy_sim(sim)
+        raise RuntimeError(f"failed to load robot URDF from {SHARED_MOVE_URDF}")
     dof_names = list(gym.get_asset_dof_names(robot_asset))
+    if not dof_names:
+        gym.destroy_sim(sim)
+        raise RuntimeError(
+            f"robot asset from {SHARED_MOVE_URDF} contains no active DOFs"
+        )
 
     # Reorder targets
     pick_targets = _reorder_targets(pick_targets, list(plan["move_dof_names"]), dof_names)
@@ -461,6 +475,9 @@ class MoveProSimulator:
                 import traceback
                 print(f"  箱#{bt.index} 仿真异常: {e}")
                 traceback.print_exc()
+                raise RuntimeError(
+                    f"simulation stopped after box {bt.index} failed"
+                ) from e
 
         print(f"\n全部完成: {placed}/{plan.total_boxes} 箱")
         return plan
