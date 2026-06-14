@@ -1,49 +1,3 @@
-
-==================================================
-  箱#16: (3, 4, 3) → world(3.836,3.786,0.250)
-==================================================
-  箱#16 仿真异常: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-Traceback (most recent call last):
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 445, in run
-    max_frames=max_frames,
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 115, in run_single_box
-    _gt.TABLE_POSE[2] + _gt.TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
-AttributeError: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-
-==================================================
-  箱#17: (1, 1, 1) → world(4.186,3.386,0.150)
-==================================================
-  箱#17 仿真异常: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-Traceback (most recent call last):
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 445, in run
-    max_frames=max_frames,
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 115, in run_single_box
-    _gt.TABLE_POSE[2] + _gt.TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
-AttributeError: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-
-==================================================
-  箱#18: (4, 3, 3) → world(4.236,3.786,0.250)
-==================================================
-  箱#18 仿真异常: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-Traceback (most recent call last):
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 445, in run
-    max_frames=max_frames,
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 115, in run_single_box
-    _gt.TABLE_POSE[2] + _gt.TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
-AttributeError: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-
-==================================================
-  箱#19: (2, 2, 1) → world(4.536,3.736,0.150)
-==================================================
-  箱#19 仿真异常: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-Traceback (most recent call last):
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 445, in run
-    max_frames=max_frames,
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 115, in run_single_box
-    _gt.TABLE_POSE[2] + _gt.TABLE_SIZE[2] * 0.5 + box_size_m[2] * 0.5,
-AttributeError: module 'move_pro.grab_test' has no attribute 'TABLE_SIZE'
-
-全部完成: 0/20 箱
 (rlgpu) u2004@u2004-Z790-EAGLE-AX:~/yyx/tiangong$ python -m move_pro.run --mode sim --method LSAH --num-boxes 20 --fast
 Importing module 'gym_37' (/home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_37.so)
 Setting GYM_USD_PLUG_INFO_PATH to /home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
@@ -56,65 +10,43 @@ Building extension module gymtorch...
 Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
 ninja: no work to do.
 Loading extension module gymtorch...
-
-============================================================
-  move_pro 智能码垛 — Isaac Gym 仿真模式
-  方法: LSAH, 箱数: 20
-============================================================
-
-BPP 决策中 ...
-========================================================================
-MovePro online packing plan
-========================================================================
-boxes: 20/20
-utilization: 15.69%
-[ok] box 0: size=(0.2, 0.1, 0.1) target=(3.736, 3.086, 0.150) rotation=0
-[ok] box 1: size=(0.1, 0.1, 0.1) target=(3.886, 3.086, 0.150) rotation=0
-[ok] box 2: size=(0.2, 0.2, 0.30000000000000004) target=(3.736, 3.136, 0.350) rotation=0
-[ok] box 3: size=(0.2, 0.2, 0.2) target=(4.036, 3.136, 0.200) rotation=0
-[ok] box 4: size=(0.2, 0.2, 0.2) target=(4.236, 3.136, 0.200) rotation=0
-[ok] box 5: size=(0.1, 0.2, 0.2) target=(4.386, 3.136, 0.200) rotation=0
-[ok] box 6: size=(0.1, 0.2, 0.1) target=(4.486, 3.136, 0.150) rotation=1
-[ok] box 7: size=(0.4, 0.3, 0.30000000000000004) target=(4.036, 3.186, 0.450) rotation=0
-[ok] box 8: size=(0.2, 0.1, 0.1) target=(3.736, 3.286, 0.150) rotation=1
-[ok] box 9: size=(0.4, 0.4, 0.4) target=(4.436, 3.436, 0.300) rotation=0
-[ok] box 10: size=(0.3, 0.3, 0.2) target=(3.786, 3.486, 0.200) rotation=0
-[ok] box 11: size=(0.1, 0.1, 0.2) target=(4.586, 3.086, 0.200) rotation=0
-[ok] box 12: size=(0.1, 0.1, 0.1) target=(4.586, 3.186, 0.150) rotation=0
-[ok] box 13: size=(0.2, 0.1, 0.1) target=(4.036, 3.386, 0.150) rotation=1
-[ok] box 14: size=(0.2, 0.2, 0.1) target=(4.036, 3.536, 0.150) rotation=0
-[ok] box 15: size=(0.2, 0.2, 0.2) target=(4.036, 3.436, 0.300) rotation=0
-[ok] box 16: size=(0.4, 0.3, 0.30000000000000004) target=(3.836, 3.786, 0.250) rotation=1
-[ok] box 17: size=(0.1, 0.1, 0.1) target=(4.186, 3.386, 0.150) rotation=0
-[ok] box 18: size=(0.4, 0.3, 0.30000000000000004) target=(4.236, 3.786, 0.250) rotation=0
-[ok] box 19: size=(0.2, 0.2, 0.1) target=(4.536, 3.736, 0.150) rotation=0
-
-==================================================
-  箱#0: (2, 1, 1) → world(3.736,3.086,0.150)
-==================================================
-Not connected to PVD
-Physics Engine: PhysX
-Physics Device: cpu
-GPU Pipeline: disabled
-*** Failed to load '/home/u2004/yyx/tiangong/move_pro/assets/integrated/tianyi_xhand_move.urdf'[Error] [carb.gym.plugin] Failed to parse URDF file 'integrated/tianyi_xhand_move.urdf'
-[Error] [carb.gym.plugin] Failed to import URDF file 'integrated/tianyi_xhand_move.urdf'
-[Error] [carb.gym.plugin] *** Failed to load 'integrated/tianyi_xhand_move.urdf' from '/home/u2004/yyx/tiangong/move_pro/assets'
-  箱#0 仿真异常: operation does not have an identity.
 Traceback (most recent call last):
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 445, in run
-    max_frames=max_frames,
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 125, in run_single_box
-    max_frames=max_frames,
-  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 283, in _run_grab_test_task_single
-    timeline = _smooth_timeline_joint_steps(timeline, max_joint_step=0.02)
-  File "/home/u2004/yyx/tiangong/move_pro/tasks/grab_test_task.py", line 107, in _smooth_timeline_joint_steps
-    max_delta = float(torch.max(torch.abs(q - prev_q)).item())
-RuntimeError: operation does not have an identity.
-
-==================================================
-  箱#1: (1, 1, 1) → world(3.886,3.086,0.150)
-==================================================
-/buildAgent/work/99bede84aa0a52c2/source/foundation/FdFoundation.cpp (166) : invalid operation : Foundation object exists already. Only one instance per process can be created.
-
-段错误
+  File "/home/u2004/miniconda3/envs/rlgpu/lib/python3.7/runpy.py", line 193, in _run_module_as_main
+    "__main__", mod_spec)
+  File "/home/u2004/miniconda3/envs/rlgpu/lib/python3.7/runpy.py", line 85, in _run_code
+    exec(code, run_globals)
+  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 150, in <module>
+    main()
+  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 146, in main
+    cmd_sim(args)
+  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 76, in cmd_sim
+    from move_pro.simulation import MoveProSimulator
+  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 82, in <module>
+    tuple[float, float, float],
+TypeError: 'type' object is not subscriptable
 (rlgpu) u2004@u2004-Z790-EAGLE-AX:~/yyx/tiangong$ python -m move_pro.run --mode sim --method LSAH --num-boxes 20 --fast
+Importing module 'gym_37' (/home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/linux-x86_64/gym_37.so)
+Setting GYM_USD_PLUG_INFO_PATH to /home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/linux-x86_64/usd/plugInfo.json
+PyTorch version 1.8.1
+Device count 1
+/home/u2004/xhand/realsense/isaac/isaacgym/python/isaacgym/_bindings/src/gymtorch
+Using /home/u2004/.cache/torch_extensions as PyTorch extensions root...
+Emitting ninja build file /home/u2004/.cache/torch_extensions/gymtorch/build.ninja...
+Building extension module gymtorch...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+ninja: no work to do.
+Loading extension module gymtorch...
+Traceback (most recent call last):
+  File "/home/u2004/miniconda3/envs/rlgpu/lib/python3.7/runpy.py", line 193, in _run_module_as_main
+    "__main__", mod_spec)
+  File "/home/u2004/miniconda3/envs/rlgpu/lib/python3.7/runpy.py", line 85, in _run_code
+    exec(code, run_globals)
+  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 150, in <module>
+    main()
+  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 146, in main
+    cmd_sim(args)
+  File "/home/u2004/yyx/tiangong/move_pro/run.py", line 76, in cmd_sim
+    from move_pro.simulation import MoveProSimulator
+  File "/home/u2004/yyx/tiangong/move_pro/simulation.py", line 82, in <module>
+    tuple[float, float, float],
+TypeError: 'type' object is not subscriptable
