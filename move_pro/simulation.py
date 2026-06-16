@@ -318,14 +318,21 @@ def _build_timeline(plan: dict[str, object], dof_names: list[str]) -> list[Timel
 
     # 返回路径：放完箱子后机器人沿来路反向退回桌子起点，而不是瞬间闪回。
     # 复用 move 的 root_route（table→pallet），反向采样得到 pallet→table。
-    # 手臂保持 release 姿态（已收回），不再携带箱子。
+    # 返回途中手臂从 release 姿态平滑收回到待命姿态 pick_frames[0]（每个箱子
+    # timeline 的起始姿态），避免一直前伸着退回去。
     return_route = [pose for _, pose in reversed(root_route)]
     return_frames: list = []
     for start, goal in zip(return_route, return_route[1:]):
         if start != goal:
             return_frames.extend(sample_root_trajectory(start, goal))
-    for root in return_frames:
-        timeline.append(("return", root, release_target, release_center, 0.0))
+    home_q = pick_frames[0]
+    total_return = len(return_frames)
+    # 手臂在返回前段（前 60%）完成收回，之后保持待命姿态稳定行进。
+    retract_frames = max(1, int(total_return * 0.6))
+    for index, root in enumerate(return_frames):
+        alpha = _smoothstep(min(1.0, index / retract_frames))
+        q = release_target * (1.0 - alpha) + home_q * alpha
+        timeline.append(("return", root, q, release_center, 0.0))
 
     return _smooth_timeline_joint_steps(timeline, max_joint_step=0.02)
 
