@@ -11,6 +11,7 @@ from move_pro.config import (
     BIN_TO_WORLD_SCALE,
     DEFAULT_ITEM_SET,
     MAX_REACH_X_BIN,
+    MIN_SUPPORT_RATIO,
     PALLET_SURFACE_Z,
     pallet_center_world,
 )
@@ -66,6 +67,7 @@ class BPPDecider:
         item_set: Optional[Iterable[tuple[int, int, int]]] = None,
         setting: int = 2,
         max_reach_x_bin: Optional[int] = MAX_REACH_X_BIN,
+        min_support_ratio: float = MIN_SUPPORT_RATIO,
     ) -> None:
         method = "LASH" if method == "LSAH" else method
         if method not in {"LASH", "OnlineBPH", "DBL", "BR"}:
@@ -86,6 +88,7 @@ class BPPDecider:
         self.orientation = orientation
         self.setting = setting
         self.max_reach_x_bin = max_reach_x_bin
+        self.min_support_ratio = float(min_support_ratio)
         size_minimum = min(min(size) for size in self.item_set)
         self.space = Space(*self.container_size, size_minimum, holder=200)
         self.packed_count = 0
@@ -218,6 +221,25 @@ class BPPDecider:
             return True
         return lx + x <= self.max_reach_x_bin
 
+    def _supported(self, lx: int, ly: int, x: int, y: int, height: int) -> bool:
+        """底面支撑率是否达标，用于逐层堆叠约束（见 config:MIN_SUPPORT_RATIO）。
+
+        支撑率 = 落点下方高度图中等于落点高度 height 的格子占比。height==0 时
+        箱子直接坐在托盘上，支撑率必为 1.0；height>0 时只有下层在该位置铺满
+        才有高支撑率，否则视为悬空被拒，从而强制先铺满下层。
+        """
+        if self.min_support_ratio <= 0.0:
+            return True
+        rec = self.space.plain[lx:lx + x, ly:ly + y]
+        if rec.size == 0:
+            return False
+        support = float(np.count_nonzero(rec == height)) / float(rec.size)
+        return support >= self.min_support_ratio
+
+    def _admissible(self, lx, ly, x, y, height) -> bool:
+        """候选是否同时满足可达性与支撑率约束。"""
+        return self._reachable(lx, x) and self._supported(lx, ly, x, y, height)
+
     def _placement(self, candidate, score: float) -> Placement:
         lx, ly, lz, x, y, z, orientation = candidate
         world = self.to_world(lx, ly, lz, x, y, z)
@@ -235,7 +257,7 @@ class BPPDecider:
                 if not self._reachable(lx, x):
                     continue
                 feasible, height = self._virtual((x, y, z), lx, ly)
-                if feasible:
+                if feasible and self._supported(lx, ly, x, y, height):
                     yield (lx, ly, height, x, y, z, orientation), ems
 
     def _decide_lash(self, box) -> Placement:
@@ -265,7 +287,7 @@ class BPPDecider:
                 if not self._reachable(lx, size[0]):
                     continue
                 feasible, height = self._virtual(size, lx, ly)
-                if feasible:
+                if feasible and self._supported(lx, ly, size[0], size[1], height):
                     return self._placement((lx, ly, height, *size, orientation), 0.0)
         return self._empty(box)
 
@@ -280,7 +302,11 @@ class BPPDecider:
                 for ly in range(bin_y - y + 1):
                     feasible, height = self._virtual((x, y, z), lx, ly)
                     score = lx + ly + 100 * height
-                    if feasible and score < best_score:
+                    if (
+                        feasible
+                        and self._supported(lx, ly, x, y, height)
+                        and score < best_score
+                    ):
                         best = (lx, ly, height, x, y, z, orientation)
                         best_score = score
         return self._empty(box) if best is None else self._placement(best, -float(best_score))

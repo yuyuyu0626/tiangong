@@ -161,11 +161,14 @@ def _dynamic_move_box(scene: OfflineTest3Scene, box_size, source_pose):
         _move_grab.BOX_POSE,
         _move_grab.MOVE_URDF,
         _move_grab.build_offline_test3_scene,
+        _move_grab._plan_pose_path_world,
     )
     _move_grab.BOX_SIZE = tuple(box_size)
     _move_grab.BOX_POSE = tuple(source_pose)
     _move_grab.MOVE_URDF = MOVE_URDF
     _move_grab.build_offline_test3_scene = lambda stand_off=0.0: scene
+    # 用顶降式放置路径覆盖 move 默认的斜线路径，避免搬运中的箱子蹭到已放箱子。
+    _move_grab._plan_pose_path_world = _topdown_pose_path_world
     try:
         yield
     finally:
@@ -174,7 +177,57 @@ def _dynamic_move_box(scene: OfflineTest3Scene, box_size, source_pose):
             _move_grab.BOX_POSE,
             _move_grab.MOVE_URDF,
             _move_grab.build_offline_test3_scene,
+            _move_grab._plan_pose_path_world,
         ) = original
+
+
+# 顶降放置：箱子先抬到高于所有已放箱子的安全高度，水平移动到目标正上方，
+# 再垂直下降到 release 点。水平移动全程发生在已放箱子之上，下降只在目标格内，
+# 因此机器人/箱子不会蹭到已放好的箱子（4b 避障）。仅覆盖放置段路径，
+# 不触碰 BPP 决策与 IK 求解本身。
+PLACE_AVOID_CLEARANCE = 0.08  # 安全高度相对已放箱子顶面的额外余量(m)
+
+
+def _topdown_pose_path_world(scene, start_center, start_theta):
+    target = _move_grab._target_world_center(scene)
+    release = (
+        target[0],
+        target[1],
+        target[2] + _move_grab.PLACE_RELEASE_HEIGHT,
+    )
+    stack = scene.stack_scene
+    preset_top = max(
+        stack.pallet_surface_z + placement.max_corner[2]
+        for placement in stack.preset_boxes
+    )
+    # 安全高度：取已放箱子顶面、起点、release 点三者最高，再加余量。
+    safe_z = max(preset_top, start_center[2], release[2]) + PLACE_AVOID_CLEARANCE
+    start = start_center
+    above_start = (start[0], start[1], safe_z)
+    above_target = (release[0], release[1], safe_z)
+
+    path = [("place_handoff_tilted", start, start_theta)]
+    # 1) 原地转正并抬升到安全高度
+    _move_grab._append_pose_segment(
+        path, "place_rotate_upright", start, above_start,
+        start_theta, 0.0, _move_grab.PLACE_UPRIGHT_FRAMES,
+    )
+    # 2) 在安全高度水平移动到目标正上方
+    _move_grab._append_pose_segment(
+        path, "place_traverse_above", above_start, above_target,
+        0.0, 0.0, _move_grab.PLACE_XY_SEGMENT_FRAMES * 2,
+    )
+    # 3) 垂直下降到 release 点
+    _move_grab._append_pose_segment(
+        path, "place_descend", above_target, release,
+        0.0, 0.0, _move_grab.PLACE_DESCEND_FRAMES,
+    )
+    path.extend(
+        ("place_hold", release, 0.0)
+        for _ in range(_move_grab.PLACE_HOLD_FRAMES)
+    )
+    # 顶降路径全程高于已放箱子，clearance 必然满足。
+    return path, True
 
 
 def _build_timeline(plan: dict[str, object], dof_names: list[str]) -> list[TimelineFrame]:

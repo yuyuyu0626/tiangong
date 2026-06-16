@@ -292,3 +292,55 @@ custom-constrained packing 思路）：
 行程）用 `_smoothstep` 从 `release_target` 平滑插值回待命姿态 `pick_frames[0]`
 （每个箱子 timeline 的起始姿态），之后保持待命姿态行进。返回终点（基座回原点 +
 手臂待命）与下一个箱子 pick 起始姿态连续衔接，无跳变。验证 3 箱 seed42 误差 0.0000。
+
+---
+
+## 11. 问题 4：逐层放置约束 + 放置避障（已修复，纯 planning）
+
+### 4a：逐层/支撑约束
+
+**根因**：`pct_core/space.py:check_box` 在 `setting==2`（move_pro 默认）时直接
+`return True`，不做任何稳定性/支撑判断，故允许"下层未铺满就往上摞"。
+
+**修复**（在 BPPDecider 层加约束，不改 PCT setting，可控）：
+- `config.py:MIN_SUPPORT_RATIO = 0.85`。
+- `bpp_decider.py:_supported(lx,ly,x,y,height)`：支撑率 = 落点下方高度图
+  `space.plain[lx:lx+x, ly:ly+y]` 中等于落点高度 height 的格子占比。
+  height==0（坐在托盘上）支撑率必为 1.0；height>0 时只有下层在该位置铺满
+  支撑率才够，否则视为悬空被拒——天然强制先铺满下层再往上摞。
+- 在 `_ems_candidates`、`_decide_online_bph`、`_decide_dbl` 三处候选生成应用。
+
+**效果**：原本悬空的箱子（如 box 2 高 0.3 曾被放到 z=0.350 悬空），现在落到
+真实支撑面（z=0.250）。15 箱 plan 验证无悬空堆叠。
+
+### 4b：机器人放置时避开已放箱子
+
+**根因**：move 默认放置路径 `_plan_pose_path_world` 是 handoff→**斜线直插**
+release 点，搬运中的箱子会斜穿、蹭到目标格旁已放的更高箱子；且 `clearance_ok`
+只是个布尔标记，不满足也照样执行，不绕开。
+
+**修复**（顶降式 top-down 放置，码垛机器人标准做法）：
+`simulation.py:_topdown_pose_path_world` 覆盖 move 默认路径（经
+`_dynamic_move_box` 的 monkeypatch，不改 move 源码）：
+1. 原地转正并抬升到安全高度 `safe_z = max(已放箱顶面, 起点, release) + 0.08`。
+2. 在安全高度水平移动到目标正上方。
+3. 垂直下降到 release 点。
+
+水平移动全程高于所有已放箱子，下降只发生在目标格内，因此机器人/箱子不会蹭到
+已放好的箱子。仅覆盖放置段路径，不触碰 BPP 决策与 IK 求解。
+
+### 验证结果（问题 4）
+
+| 方法 | 种子 | 箱数 | 完成 | 最大误差 | place IK 误差 |
+|------|------|------|------|---------|--------------|
+| LSAH | 42 | 6 | 6/6 | 0.0000 m | ≤0.021 |
+| OnlineBPH | 7 | 10 | 10/10 | 0.0000 m | — |
+
+单元测试 5/5 通过。无悬空、无穿插、放置路径走顶降避障。
+
+### 关于"可移动机器人 vs PCT 固定机械臂"的优势
+
+问题 4 的解法正体现了可移动机器人的优势：可达性约束（4D/问题 D）让 BPP 只在
+机器人够得到的区域放置，顶降避障（4b）利用自上而下的放置方式天然避开邻箱。
+这些都是 planning 层的约束满足，PCT 的 RL 模型（观测里无机器人位姿/避障信息）
+反而无法表达——再次印证：move_pro 用 planning 而非套用 PCT 旧模型是正确路线。

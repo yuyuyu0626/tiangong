@@ -72,6 +72,13 @@ BIN_TO_WORLD_SCALE = (
 # BPPDecider 用它过滤够不到的候选格，避免 LSAH 把箱子放到机器人够不着的地方。
 MAX_REACH_X_BIN = 7
 
+# ---- 放置稳定性约束（逐层堆叠） ----
+# 候选放置点底面的支撑率 = 落点下方高度图中等于落点高度的格子占比。
+# 支撑率 < MIN_SUPPORT_RATIO 的候选被拒绝，避免箱子悬空/只搭一角。
+# 这天然实现"逐层放置"：上层只有在下层于该位置铺满时支撑率才够，
+# 否则被拒，从而强制先把下层铺满再往上摞。1.0=必须完全支撑，0.8=允许少量悬空。
+MIN_SUPPORT_RATIO = 0.85
+
 # ---- IK 参数 ----
 DEFAULT_IK_ITERATIONS = 80
 PLACE_IK_ITERATIONS = 80
