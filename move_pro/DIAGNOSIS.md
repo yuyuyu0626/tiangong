@@ -344,3 +344,37 @@ release 点，搬运中的箱子会斜穿、蹭到目标格旁已放的更高箱
 机器人够得到的区域放置，顶降避障（4b）利用自上而下的放置方式天然避开邻箱。
 这些都是 planning 层的约束满足，PCT 的 RL 模型（观测里无机器人位姿/避障信息）
 反而无法表达——再次印证：move_pro 用 planning 而非套用 PCT 旧模型是正确路线。
+
+---
+
+## 12. 恢复 move 的四侧站位择优（已修复）
+
+**问题**：用户反馈 move_pro 机器人放置时只从一个方向（-X 侧）接近，与 move 不一致。
+move 能按箱子位置从托盘四侧选最合适的站位接近，move_pro 退化成了固定一侧。
+
+**根因**：`simulation.py:_make_bpp_scene` 硬编码调用 `_solve_test3_root_pose`，
+该函数只算 -X 侧站位（`grab_test.py:316-323`）。这也是之前不得不加 x≤4.34 可达
+约束的根源——机器人从 -X 侧够不到托盘远端。
+
+**修复**（复用 move.planning 已验证的四侧规划，不改 move 源码）：
+- `_side_stance_and_route(stack, target, stand_off, side)`：用
+  `generate_stance_plans` 生成四侧站位、`build_route_plans` 生成对应侧的安全
+  走廊路线，挑出指定侧，转成 `OfflineTest3Scene` 需要的 `(label, Pose)` waypoints。
+- `_make_bpp_scene` 加 `side` 参数。
+- `_ordered_sides(target)`：按目标到托盘四边的距离排序接近侧（离哪边近优先从
+  哪侧接近，手臂前伸最短最易 IK 可行），四侧都作回退。
+- `_prepare_boxes` 对每个箱子遍历"侧 × stand_off"，选 IK 可行且 pick+place
+  误差最小的组合，并打印选中的 side。
+- `config.py:MAX_REACH_X_BIN` 改为 `None`（关闭可达过滤）——四侧站位后整个托盘
+  可达，不再需要限制 BPP 只放近端。
+
+**验证（headless）**：
+
+| 方法 | 种子 | 箱数 | 完成 | 用到的侧 | 最大 place 误差 |
+|------|------|------|------|---------|----------------|
+| LSAH | 42 | 6 | 6/6 | -X, -Y | 0.032 |
+| OnlineBPH | 3 | 12 | 12/12 | -X, +X, -Y, +Y | 0.057 |
+
+12 箱用例中 box 4/8/9 从 +X 侧、box 6 从 +Y 侧接近——正是早期够不到、被可达约束
+屏蔽的托盘远端区域，现在能正常放置。机器人按箱子位置选最合适方向接近，行为与
+move 一致。单元测试 5/5 通过。

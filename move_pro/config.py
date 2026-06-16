@@ -65,12 +65,11 @@ BIN_TO_WORLD_SCALE = (
 )
 
 # ---- 机器人可达性约束 ----
-# 机器人是移动底盘，正对 +x 站在托盘近端边缘，靠手臂前伸放置。
-# 经 tools/probe_reach.py 实测：放置可达上限约为托盘近端起 0.70m 深
-# （世界 x≈4.34），超过则 place IK 误差 > PLACE_ERROR_LIMIT(0.06)。
-# 换算成 PCT bin 坐标（容器 x=10 对应托盘 1.0m）：箱子远端边缘 lx+x_size 不得超过 7。
-# BPPDecider 用它过滤够不到的候选格，避免 LSAH 把箱子放到机器人够不着的地方。
-MAX_REACH_X_BIN = 7
+# 早期 move_pro 硬编码机器人只从托盘 -X 侧接近，导致够不到托盘远端（世界 x>4.34），
+# 当时用 MAX_REACH_X_BIN 过滤够不到的格子。现在 simulation.py 恢复了 move 的四侧
+# 站位择优（_ordered_sides + generate_stance_plans），机器人可从最近的一侧接近，
+# 整个托盘都可达，故默认关闭该约束（None）。如需重新启用（如限制单侧），设为 7。
+MAX_REACH_X_BIN = None
 
 # ---- 放置稳定性约束（逐层堆叠） ----
 # 候选放置点底面的支撑率 = 落点下方高度图中等于落点高度的格子占比。

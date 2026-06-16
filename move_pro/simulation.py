@@ -30,9 +30,12 @@ from move.planning import (
     BoxPlacement,
     EmptySpace,
     StackScene,
+    build_route_plans,
+    generate_stance_plans,
     pallet_center_near_table,
     sample_root_trajectory,
 )
+from move.grab_test import Pose
 from move.tasks.grab_test_task import (
     ATTACH_AFTER_PICK_FRAMES,
     FINAL_HOLD_FRAMES,
@@ -109,6 +112,7 @@ def _make_bpp_scene(
     box_size: tuple[float, float, float],
     stand_off: float,
     preset_boxes: tuple[BoxPlacement, ...],
+    side: str = "-X",
 ) -> OfflineTest3Scene:
     sx, sy, sz = box_size
     pallet_center = pallet_center_near_table()
@@ -140,8 +144,9 @@ def _make_bpp_scene(
         empty_spaces=(),
         selected_leaf=EmptySpace(target_box.min_corner, target_box.max_corner),
     )
-    final_pose, tmp_pose = _move_grab._solve_test3_root_pose(stack, stand_off)
-    waypoints = _move_grab._build_test3_waypoints(stack, final_pose, tmp_pose)
+    final_pose, tmp_pose, waypoints = _side_stance_and_route(
+        stack, target_world_center, stand_off, side
+    )
     return OfflineTest3Scene(
         name="bpp_target",
         stack_scene=stack,
@@ -150,6 +155,65 @@ def _make_bpp_scene(
         tmp_pose=tmp_pose,
         waypoints=waypoints,
     )
+
+
+# 机器人可从托盘四侧接近放置（复用 move 的 generate_stance_plans + build_route_plans，
+# 不改 move 源码）。move_pro 早期硬编码只用 -X 侧，导致机器人只能从一个方向放置、
+# 够不到托盘远端；恢复四侧择优后，每个箱子由 _prepare_boxes 选 IK 最优的一侧接近。
+PLACE_SIDES = ("-X", "+X", "-Y", "+Y")
+
+
+def _ordered_sides(target_world_center) -> tuple[str, ...]:
+    """按目标到托盘四边的距离给接近侧排序：离哪条边近就优先从那侧接近。
+
+    机器人从最近的边接近时手臂前伸最短、最可能 IK 可行。返回全部四侧（按优先级
+    排序）作为回退，保证总能找到可行站位。
+    """
+    pallet_center = pallet_center_near_table()
+    cx, cy, _ = pallet_center
+    hx, hy = PALLET_SIZE[0] * 0.5, PALLET_SIZE[1] * 0.5
+    tx, ty = target_world_center[0], target_world_center[1]
+    # 目标到四条边的距离（边在 world 坐标）。
+    dist = {
+        "+X": abs((cx + hx) - tx),
+        "-X": abs(tx - (cx - hx)),
+        "+Y": abs((cy + hy) - ty),
+        "-Y": abs(ty - (cy - hy)),
+    }
+    return tuple(sorted(PLACE_SIDES, key=lambda s: dist[s]))
+
+
+def _side_stance_and_route(stack, target_world_center, stand_off, side):
+    """按指定侧生成机器人站位 final/tmp 位姿与导航 waypoints。
+
+    复用 move.planning 已验证的四侧站位与安全走廊路线规划，只挑出所选侧。
+    返回 (final_pose, tmp_pose, waypoints) 供 OfflineTest3Scene 使用；
+    waypoints 转成 (label, Pose) 元组，与 grab_test 的消费格式一致。
+    """
+    target_xy = (target_world_center[0], target_world_center[1])
+    stances = generate_stance_plans(
+        stack.pallet_center,
+        stack.pallet_size,
+        stand_off=stand_off,
+        target_support_z=stack.pallet_surface_z,
+        placement_center_xy=target_xy,
+    )
+    stance = next((s for s in stances if s.side == side), stances[0])
+    # 站位 z 用 0（root 高度由 IK 抬升关节处理，与原 _solve_test3_root_pose 一致）。
+    final_pose = Pose(stance.pose.x, stance.pose.y, 0.0, stance.pose.yaw)
+    tmp_pose = Pose(stance.tmp_pose.x, stance.tmp_pose.y, 0.0, stance.tmp_pose.yaw)
+    flat_stance = type(stance)(
+        side=stance.side,
+        normal=stance.normal,
+        face_center=stance.face_center,
+        pose=final_pose,
+        tmp_pose=tmp_pose,
+        height_command=0.0,
+    )
+    start = Pose(0.0, 0.0, 0.0, 0.0)
+    routes = build_route_plans(start, stack, (flat_stance,))
+    waypoints = tuple((wp.label, wp.pose) for wp in routes[0].waypoints)
+    return final_pose, tmp_pose, waypoints
 
 
 @contextmanager
@@ -413,39 +477,49 @@ def _prepare_boxes(
             0.80,
             0.90,
         )
+        # 按箱子位置把最可能可达的一侧排在前面：x 越靠托盘远端越优先从 +X 侧接近，
+        # y 偏一侧则优先对应 ±Y 侧。其余侧作为回退，确保总能找到可行站位。
+        sides = _ordered_sides(task.world_target)
         attempts = []
-        seen_offsets = set()
-        for candidate_offset in candidate_offsets:
-            candidate_offset = round(float(candidate_offset), 3)
-            if candidate_offset in seen_offsets:
-                continue
-            seen_offsets.add(candidate_offset)
-            candidate_scene = _make_bpp_scene(
-                task.world_target,
-                box_size,
-                candidate_offset,
-                tuple(preset_boxes),
-            )
-            with _dynamic_move_box(
-                candidate_scene, box_size, source_pose
-            ):
-                candidate_report, candidate_plan = _move_grab.run(
-                    place_mode="move", stand_off=candidate_offset
-                )
-            attempts.append(
-                (
-                    candidate_report.pick_max_error
-                    + candidate_report.place_max_error,
+        found_feasible = False
+        for side in sides:
+            seen_offsets = set()
+            for candidate_offset in candidate_offsets:
+                candidate_offset = round(float(candidate_offset), 3)
+                if candidate_offset in seen_offsets:
+                    continue
+                seen_offsets.add(candidate_offset)
+                candidate_scene = _make_bpp_scene(
+                    task.world_target,
+                    box_size,
                     candidate_offset,
-                    candidate_scene,
-                    candidate_report,
-                    candidate_plan,
+                    tuple(preset_boxes),
+                    side=side,
                 )
-            )
-            if (
-                candidate_report.pick_feasible
-                and candidate_report.place_feasible
-            ):
+                with _dynamic_move_box(
+                    candidate_scene, box_size, source_pose
+                ):
+                    candidate_report, candidate_plan = _move_grab.run(
+                        place_mode="move", stand_off=candidate_offset
+                    )
+                attempts.append(
+                    (
+                        candidate_report.pick_max_error
+                        + candidate_report.place_max_error,
+                        candidate_offset,
+                        candidate_scene,
+                        candidate_report,
+                        candidate_plan,
+                        side,
+                    )
+                )
+                if (
+                    candidate_report.pick_feasible
+                    and candidate_report.place_feasible
+                ):
+                    found_feasible = True
+                    break
+            if found_feasible:
                 break
 
         feasible_attempts = [
@@ -455,20 +529,21 @@ def _prepare_boxes(
         ]
         if not feasible_attempts:
             details = ", ".join(
-                f"{offset:.2f}:"
+                f"{side}@{offset:.2f}:"
                 f"{attempt_report.pick_max_error:.4f}/"
                 f"{attempt_report.place_max_error:.4f}"
-                for _, offset, _, attempt_report, _ in attempts
+                for _, offset, _, attempt_report, _, side in attempts
             )
             raise RuntimeError(
                 f"IK infeasible for box {task.index}: "
-                f"stand_off attempts [{details}]"
+                f"attempts [{details}]"
             )
-        _, selected_offset, scene, report, move_plan = min(
+        _, selected_offset, scene, report, move_plan, selected_side = min(
             feasible_attempts, key=lambda attempt: attempt[0]
         )
         print(
-            f"  prepared box={task.index} stand_off={selected_offset:.2f} "
+            f"  prepared box={task.index} side={selected_side} "
+            f"stand_off={selected_offset:.2f} "
             f"pick={report.pick_max_error:.4f} "
             f"place={report.place_max_error:.4f}"
         )
