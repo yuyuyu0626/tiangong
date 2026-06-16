@@ -1,71 +1,45 @@
 """Continuous multi-box Isaac Gym simulation for move_pro.
 
-PCT selects each target online. The robot motion, IK helpers, timeline
-construction, and attach/release behavior come from the original move project.
-Unlike the first move_pro prototype, one simulation and one viewer are kept
-alive for the complete box sequence.
+PCT selects each target online (variable-size boxes). Everything else — pick
+keyframes, root routes, place path, timeline, attach/release/playback, and the
+scene layout — is reused from move's task1_2 placement layer via
+``move_pro.task1_2_adapter``. This keeps move_pro's non-decision behavior
+byte-aligned with the polished task1_2 stacking demo.
 """
 
 from __future__ import annotations
 
 # Isaac Gym must be imported before torch.
 from isaacgym import gymapi, gymtorch  # type: ignore
-import torch
 
-import math
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Tuple
 
-import move.grab_test as _move_grab
-import move.tasks.grab_test_task as _grab_task
-from move.grab_test import OfflineTest3Scene, SIM_PLACE_STAND_OFF
+import move.tasks.task1_2 as t12
 from move.planning import (
-    BOX_POSE,
     PALLET_SIZE,
     PALLET_SURFACE_Z,
     PALLET_THICKNESS,
     TABLE_POSE,
     TABLE_SIZE,
-    BoxPlacement,
-    EmptySpace,
-    StackScene,
-    build_route_plans,
-    generate_stance_plans,
     pallet_center_near_table,
-    sample_root_trajectory,
 )
-from move.grab_test import Pose
 from move.tasks.grab_test_task import (
-    ATTACH_AFTER_PICK_FRAMES,
-    FINAL_HOLD_FRAMES,
-    MOVE_APPROACH_FRAMES,
-    MOVE_LIFT_FRAMES,
-    MOVE_SETTLE_FRAMES,
-    PICK_SEGMENT_FRAMES,
-    PLACE_HANDOFF_FRAMES,
+    _set_robot_dof_state,
     _actor_center,
     _actor_yaw_pitch,
-    _add_vec,
-    _distance,
-    _expand_centers,
-    _expand_key_targets,
     _grasp_center,
     _grasp_theta,
     _inverse_rotate_yaw_pitch,
-    _lock_mobile_dof_state,
-    _pose_from_dict,
-    _reorder_targets,
     _rotate_yaw_pitch,
-    _set_actor_collision_filter,
-    _set_actor_root_pose,
-    _set_hand_box_collision_enabled,
-    _set_robot_dof_state,
-    _set_task_collision_filters,
-    _smooth_timeline_joint_steps,
-    _smoothstep,
+    _add_vec,
     _sub_vec,
-    _transform_local_point,
+    _distance,
+    _lock_mobile_dof_state,
+    _set_actor_root_pose,
+    _set_actor_collision_filter,
+    _set_hand_box_collision_enabled,
+    _set_task_collision_filters,
 )
 from move.tasks.move_test1 import (
     _make_transform,
@@ -77,103 +51,31 @@ from move.tasks.move_test1 import (
 
 from move_pro.config import BOX_MASS, MOVE_URDF
 from move_pro.integrator import BoxTask, MoveProIntegrator, MoveProPlan
-
-
-TimelineFrame = Tuple[
-    str,
-    object,
-    torch.Tensor,
-    Tuple[float, float, float],
-    float,
-]
+from move_pro.task1_2_adapter import build_pct_box_plan
 
 
 @dataclass
 class PreparedBox:
     task: BoxTask
-    scene: OfflineTest3Scene
-    timeline: list[TimelineFrame]
-    source_pose: tuple[float, float, float]
+    plan: object               # task1_2.BoxPlan
+    timeline: list
     pick_error: float
     place_error: float
     stand_off: float
+    side: str
 
 
-def _source_pose(box_size: tuple[float, float, float]) -> tuple[float, float, float]:
-    return (
-        BOX_POSE[0],
-        BOX_POSE[1],
-        TABLE_POSE[2] + TABLE_SIZE[2] * 0.5 + box_size[2] * 0.5,
-    )
-
-
-def _make_bpp_scene(
-    target_world_center: tuple[float, float, float],
-    box_size: tuple[float, float, float],
-    stand_off: float,
-    preset_boxes: tuple[BoxPlacement, ...],
-    side: str = "-X",
-) -> OfflineTest3Scene:
-    sx, sy, sz = box_size
-    pallet_center = pallet_center_near_table()
-    local_center = (
-        target_world_center[0] - (pallet_center[0] - PALLET_SIZE[0] * 0.5),
-        target_world_center[1] - (pallet_center[1] - PALLET_SIZE[1] * 0.5),
-        target_world_center[2] - PALLET_SURFACE_Z,
-    )
-    target_min = (
-        local_center[0] - sx * 0.5,
-        local_center[1] - sy * 0.5,
-        local_center[2] - sz * 0.5,
-    )
-    target_box = BoxPlacement("bpp_target", target_min, box_size)
-
-    # The thin support is planning-only. The real pallet actor supplies the
-    # physical support in the shared simulation.
-    floor_support = BoxPlacement(
-        "_pallet_support",
-        (0.0, 0.0, 0.0),
-        (PALLET_SIZE[0], PALLET_SIZE[1], 0.001),
-    )
-    stack = StackScene(
-        pallet_center=pallet_center,
-        pallet_size=PALLET_SIZE,
-        pallet_surface_z=PALLET_SURFACE_Z,
-        preset_boxes=(floor_support, *preset_boxes),
-        next_box=target_box,
-        empty_spaces=(),
-        selected_leaf=EmptySpace(target_box.min_corner, target_box.max_corner),
-    )
-    final_pose, tmp_pose, waypoints = _side_stance_and_route(
-        stack, target_world_center, stand_off, side
-    )
-    return OfflineTest3Scene(
-        name="bpp_target",
-        stack_scene=stack,
-        target_support_z=target_world_center[2] - sz * 0.5,
-        final_pose=final_pose,
-        tmp_pose=tmp_pose,
-        waypoints=waypoints,
-    )
-
-
-# 机器人可从托盘四侧接近放置（复用 move 的 generate_stance_plans + build_route_plans，
-# 不改 move 源码）。move_pro 早期硬编码只用 -X 侧，导致机器人只能从一个方向放置、
-# 够不到托盘远端；恢复四侧择优后，每个箱子由 _prepare_boxes 选 IK 最优的一侧接近。
+# 机器人可从托盘四侧接近放置。move_pro 早期硬编码只用 -X 侧，导致够不到托盘远端。
+# 按目标到托盘四边的距离排序接近侧（离哪边近优先从哪侧接近，手臂前伸最短最易 IK 可行），
+# 四侧都作回退，保证整个托盘可达。
 PLACE_SIDES = ("-X", "+X", "-Y", "+Y")
 
 
 def _ordered_sides(target_world_center) -> tuple[str, ...]:
-    """按目标到托盘四边的距离给接近侧排序：离哪条边近就优先从那侧接近。
-
-    机器人从最近的边接近时手臂前伸最短、最可能 IK 可行。返回全部四侧（按优先级
-    排序）作为回退，保证总能找到可行站位。
-    """
     pallet_center = pallet_center_near_table()
     cx, cy, _ = pallet_center
     hx, hy = PALLET_SIZE[0] * 0.5, PALLET_SIZE[1] * 0.5
     tx, ty = target_world_center[0], target_world_center[1]
-    # 目标到四条边的距离（边在 world 坐标）。
     dist = {
         "+X": abs((cx + hx) - tx),
         "-X": abs(tx - (cx - hx)),
@@ -183,595 +85,233 @@ def _ordered_sides(target_world_center) -> tuple[str, ...]:
     return tuple(sorted(PLACE_SIDES, key=lambda s: dist[s]))
 
 
-def _side_stance_and_route(stack, target_world_center, stand_off, side):
-    """按指定侧生成机器人站位 final/tmp 位姿与导航 waypoints。
-
-    复用 move.planning 已验证的四侧站位与安全走廊路线规划，只挑出所选侧。
-    返回 (final_pose, tmp_pose, waypoints) 供 OfflineTest3Scene 使用；
-    waypoints 转成 (label, Pose) 元组，与 grab_test 的消费格式一致。
-    """
-    target_xy = (target_world_center[0], target_world_center[1])
-    stances = generate_stance_plans(
-        stack.pallet_center,
-        stack.pallet_size,
-        stand_off=stand_off,
-        target_support_z=stack.pallet_surface_z,
-        placement_center_xy=target_xy,
-    )
-    stance = next((s for s in stances if s.side == side), stances[0])
-    # 站位 z 用 0（root 高度由 IK 抬升关节处理，与原 _solve_test3_root_pose 一致）。
-    final_pose = Pose(stance.pose.x, stance.pose.y, 0.0, stance.pose.yaw)
-    tmp_pose = Pose(stance.tmp_pose.x, stance.tmp_pose.y, 0.0, stance.tmp_pose.yaw)
-    flat_stance = type(stance)(
-        side=stance.side,
-        normal=stance.normal,
-        face_center=stance.face_center,
-        pose=final_pose,
-        tmp_pose=tmp_pose,
-        height_command=0.0,
-    )
-    start = Pose(0.0, 0.0, 0.0, 0.0)
-    routes = build_route_plans(start, stack, (flat_stance,))
-    waypoints = tuple((wp.label, wp.pose) for wp in routes[0].waypoints)
-    return final_pose, tmp_pose, waypoints
+# 站距候选：从近到远尝试，第一个 IK 可行的即采用（与早期 move_pro 一致）。
+_CANDIDATE_OFFSETS = (0.42, 0.50, 0.55, 0.60, 0.68, 0.72, 0.80, 0.90)
 
 
-@contextmanager
-def _dynamic_move_box(scene: OfflineTest3Scene, box_size, source_pose):
-    """Temporarily inject one variable-size box into move's planner."""
-
-    original = (
-        _move_grab.BOX_SIZE,
-        _move_grab.BOX_POSE,
-        _move_grab.MOVE_URDF,
-        _move_grab.build_offline_test3_scene,
-        _move_grab._plan_pose_path_world,
-    )
-    _move_grab.BOX_SIZE = tuple(box_size)
-    _move_grab.BOX_POSE = tuple(source_pose)
-    _move_grab.MOVE_URDF = MOVE_URDF
-    _move_grab.build_offline_test3_scene = lambda stand_off=0.0: scene
-    # 用顶降式放置路径覆盖 move 默认的斜线路径，避免搬运中的箱子蹭到已放箱子。
-    _move_grab._plan_pose_path_world = _topdown_pose_path_world
-    try:
-        yield
-    finally:
-        (
-            _move_grab.BOX_SIZE,
-            _move_grab.BOX_POSE,
-            _move_grab.MOVE_URDF,
-            _move_grab.build_offline_test3_scene,
-            _move_grab._plan_pose_path_world,
-        ) = original
-
-
-# 顶降放置：箱子先抬到高于所有已放箱子的安全高度，水平移动到目标正上方，
-# 再垂直下降到 release 点。水平移动全程发生在已放箱子之上，下降只在目标格内，
-# 因此机器人/箱子不会蹭到已放好的箱子（4b 避障）。仅覆盖放置段路径，
-# 不触碰 BPP 决策与 IK 求解本身。
-PLACE_AVOID_CLEARANCE = 0.08  # 安全高度相对已放箱子顶面的额外余量(m)
-
-
-def _topdown_pose_path_world(scene, start_center, start_theta):
-    target = _move_grab._target_world_center(scene)
-    release = (
-        target[0],
-        target[1],
-        target[2] + _move_grab.PLACE_RELEASE_HEIGHT,
-    )
-    stack = scene.stack_scene
-    preset_top = max(
-        stack.pallet_surface_z + placement.max_corner[2]
-        for placement in stack.preset_boxes
-    )
-    # 安全高度：取已放箱子顶面、起点、release 点三者最高，再加余量。
-    safe_z = max(preset_top, start_center[2], release[2]) + PLACE_AVOID_CLEARANCE
-    start = start_center
-    above_start = (start[0], start[1], safe_z)
-    above_target = (release[0], release[1], safe_z)
-
-    path = [("place_handoff_tilted", start, start_theta)]
-    # 1) 原地转正并抬升到安全高度
-    _move_grab._append_pose_segment(
-        path, "place_rotate_upright", start, above_start,
-        start_theta, 0.0, _move_grab.PLACE_UPRIGHT_FRAMES,
-    )
-    # 2) 在安全高度水平移动到目标正上方
-    _move_grab._append_pose_segment(
-        path, "place_traverse_above", above_start, above_target,
-        0.0, 0.0, _move_grab.PLACE_XY_SEGMENT_FRAMES * 2,
-    )
-    # 3) 垂直下降到 release 点
-    _move_grab._append_pose_segment(
-        path, "place_descend", above_target, release,
-        0.0, 0.0, _move_grab.PLACE_DESCEND_FRAMES,
-    )
-    path.extend(
-        ("place_hold", release, 0.0)
-        for _ in range(_move_grab.PLACE_HOLD_FRAMES)
-    )
-    # 顶降路径全程高于已放箱子，clearance 必然满足。
-    return path, True
-
-
-def _build_timeline(plan: dict[str, object], dof_names: list[str]) -> list[TimelineFrame]:
-    pick_targets = _reorder_targets(
-        plan["pick_targets"], list(plan["move_dof_names"]), dof_names
-    )
-    place_targets = _reorder_targets(
-        plan["place_targets"], list(plan["place_dof_names"]), dof_names
-    )
-    release_target = _reorder_targets(
-        plan["release_target"], list(plan["place_dof_names"]), dof_names
-    )
-    move_approach_target = _reorder_targets(
-        plan["move_approach_target"], list(plan["move_dof_names"]), dof_names
-    )
-    move_lift_target = _reorder_targets(
-        plan["move_lift_target"], list(plan["move_dof_names"]), dof_names
-    )
-
-    pick_frames = _expand_key_targets(pick_targets, PICK_SEGMENT_FRAMES)
-    pick_centers = _expand_centers(
-        [tuple(center) for center in plan["pick_box_centers"]],
-        PICK_SEGMENT_FRAMES,
-    )
-    root_route = [
-        ("", _pose_from_dict(pose)) for _, pose in plan["root_route"]
-    ]
-    root_frames = []
-    for (_, start), (_, goal) in zip(root_route, root_route[1:]):
-        if start != goal:
-            root_frames.extend(sample_root_trajectory(start, goal))
-    if root_frames:
-        root_frames.extend([root_frames[-1]] * MOVE_SETTLE_FRAMES)
-    if not root_frames:
-        raise RuntimeError("move produced an empty root route")
-
-    pose_path = plan.get(
-        "place_pose_path_world",
-        [(label, center, 0.0) for label, center in plan["place_center_path_world"]],
-    )
-    target_center = _move_grab._target_world_center(plan["scene"])
-    pre_place = plan.get("place_handoff_center_world", pose_path[0][1])
-    carry_start = pick_centers[-1]
-    final_root = root_frames[-1]
-    carry_final = (
-        pre_place[0] - final_root.x,
-        pre_place[1] - final_root.y,
-        pre_place[2] - final_root.z,
-    )
-    carry_approach = (
-        carry_final[0],
-        carry_final[1],
-        float(plan.get("move_approach_box_center_z", target_center[2]))
-        - final_root.z,
-    )
-    approach_theta = float(plan.get("move_approach_box_theta", 0.0))
-    preplace_theta = float(
-        plan.get("move_preplace_box_theta", approach_theta)
-    )
-
-    move_q = []
-    move_centers = []
-    move_thetas = []
-    for root in root_frames:
-        move_q.append(pick_targets[-1])
-        move_centers.append(_transform_local_point(root, carry_start))
-        move_thetas.append(0.0)
-    for index in range(1, MOVE_APPROACH_FRAMES + 1):
-        alpha = _smoothstep(index / MOVE_APPROACH_FRAMES)
-        move_q.append(
-            pick_targets[-1] * (1.0 - alpha)
-            + move_approach_target * alpha
-        )
-        local = tuple(
-            carry_start[axis] * (1.0 - alpha)
-            + carry_approach[axis] * alpha
-            for axis in range(3)
-        )
-        move_centers.append(_transform_local_point(final_root, local))
-        move_thetas.append(approach_theta * alpha)
-    for index in range(1, MOVE_LIFT_FRAMES + 1):
-        alpha = _smoothstep(index / MOVE_LIFT_FRAMES)
-        move_q.append(
-            move_approach_target * (1.0 - alpha) + move_lift_target * alpha
-        )
-        local = tuple(
-            carry_approach[axis] * (1.0 - alpha)
-            + carry_final[axis] * alpha
-            for axis in range(3)
-        )
-        move_centers.append(_transform_local_point(final_root, local))
-        move_thetas.append(
-            approach_theta * (1.0 - alpha) + preplace_theta * alpha
-        )
-
-    timeline: list[TimelineFrame] = []
-    for q, center in zip(pick_frames, pick_centers):
-        timeline.append(("pick", _move_grab.Pose(0, 0, 0, 0), q, center, 0.0))
-    all_roots = list(root_frames) + [final_root] * (
-        MOVE_APPROACH_FRAMES + MOVE_LIFT_FRAMES
-    )
-    for root, q, center, theta in zip(
-        all_roots, move_q, move_centers, move_thetas
-    ):
-        timeline.append(("move", root, q, center, theta))
-
-    dense_place_targets = [
-        place_targets[index].clone() for index in range(place_targets.shape[0])
-    ]
-    if dense_place_targets:
-        start_q = move_q[-1]
-        start_center = move_centers[-1]
-        start_theta = move_thetas[-1]
-        first_center, first_theta = pose_path[0][1], pose_path[0][2]
-        for index in range(1, PLACE_HANDOFF_FRAMES + 1):
-            alpha = _smoothstep(index / PLACE_HANDOFF_FRAMES)
-            center = tuple(
-                start_center[axis] * (1.0 - alpha)
-                + first_center[axis] * alpha
-                for axis in range(3)
-            )
-            timeline.append(
-                (
-                    "place_handoff",
-                    final_root,
-                    start_q * (1.0 - alpha)
-                    + dense_place_targets[0] * alpha,
-                    center,
-                    start_theta * (1.0 - alpha) + first_theta * alpha,
-                )
-            )
-    for q, (_, center, theta) in zip(dense_place_targets, pose_path):
-        timeline.append(("place", final_root, q, center, theta))
-
-    release_center = pose_path[-1][1]
-    timeline.append(("release", final_root, release_target, release_center, 0.0))
-    timeline.extend(
-        ("post_release", final_root, release_target, release_center, 0.0)
-        for _ in range(FINAL_HOLD_FRAMES)
-    )
-
-    # 返回路径：放完箱子后机器人沿来路反向退回桌子起点，而不是瞬间闪回。
-    # 复用 move 的 root_route（table→pallet），反向采样得到 pallet→table。
-    # 返回途中手臂从 release 姿态平滑收回到待命姿态 pick_frames[0]（每个箱子
-    # timeline 的起始姿态），避免一直前伸着退回去。
-    return_route = [pose for _, pose in reversed(root_route)]
-    return_frames: list = []
-    for start, goal in zip(return_route, return_route[1:]):
-        if start != goal:
-            return_frames.extend(sample_root_trajectory(start, goal))
-    home_q = pick_frames[0]
-    total_return = len(return_frames)
-    # 手臂在返回前段（前 60%）完成收回，之后保持待命姿态稳定行进。
-    retract_frames = max(1, int(total_return * 0.6))
-    for index, root in enumerate(return_frames):
-        alpha = _smoothstep(min(1.0, index / retract_frames))
-        q = release_target * (1.0 - alpha) + home_q * alpha
-        timeline.append(("return", root, q, release_center, 0.0))
-
-    return _smooth_timeline_joint_steps(timeline, max_joint_step=0.02)
-
-
-def _prepare_boxes(
-    plan: MoveProPlan,
-    dof_names: list[str],
-    stand_off: float,
-) -> list[PreparedBox]:
-    prepared = []
-    preset_boxes: list[BoxPlacement] = []
-    pallet_center = pallet_center_near_table()
+def _prepare_boxes(plan: MoveProPlan, asset_dof_names: list[str]) -> list[PreparedBox]:
+    """为每个 PCT 目标，遍历四侧 × 站距，选 IK 可行且误差最小的 BoxPlan。"""
+    prepared: list[PreparedBox] = []
     for task in plan.box_tasks:
         if not task.placement.feasible:
             continue
+        target = task.world_target
         box_size = task.world_size
-        source_pose = _source_pose(box_size)
-        candidate_offsets = (
-            stand_off,
-            0.42,
-            0.50,
-            0.60,
-            0.68,
-            0.72,
-            0.80,
-            0.90,
-        )
-        # 按箱子位置把最可能可达的一侧排在前面：x 越靠托盘远端越优先从 +X 侧接近，
-        # y 偏一侧则优先对应 ±Y 侧。其余侧作为回退，确保总能找到可行站位。
-        sides = _ordered_sides(task.world_target)
         attempts = []
-        found_feasible = False
-        for side in sides:
-            seen_offsets = set()
-            for candidate_offset in candidate_offsets:
-                candidate_offset = round(float(candidate_offset), 3)
-                if candidate_offset in seen_offsets:
+        found = False
+        for side in _ordered_sides(target):
+            for stand_off in _CANDIDATE_OFFSETS:
+                try:
+                    box_plan = build_pct_box_plan(target, box_size, side, stand_off)
+                except Exception as exc:  # IK / 规划失败，换下一组
+                    attempts.append((float("inf"), side, stand_off, repr(exc), None))
                     continue
-                seen_offsets.add(candidate_offset)
-                candidate_scene = _make_bpp_scene(
-                    task.world_target,
-                    box_size,
-                    candidate_offset,
-                    tuple(preset_boxes),
-                    side=side,
+                err = box_plan.pick_max_error + box_plan.place_max_error
+                feasible = (
+                    box_plan.pick_max_error <= t12.PICK_ERROR_LIMIT
+                    and box_plan.place_max_error <= t12.PLACE_ERROR_LIMIT
                 )
-                with _dynamic_move_box(
-                    candidate_scene, box_size, source_pose
-                ):
-                    candidate_report, candidate_plan = _move_grab.run(
-                        place_mode="move", stand_off=candidate_offset
-                    )
-                attempts.append(
-                    (
-                        candidate_report.pick_max_error
-                        + candidate_report.place_max_error,
-                        candidate_offset,
-                        candidate_scene,
-                        candidate_report,
-                        candidate_plan,
-                        side,
-                    )
-                )
-                if (
-                    candidate_report.pick_feasible
-                    and candidate_report.place_feasible
-                ):
-                    found_feasible = True
+                attempts.append((err, side, stand_off, box_plan, feasible))
+                if feasible:
+                    found = True
                     break
-            if found_feasible:
+            if found:
                 break
 
-        feasible_attempts = [
-            attempt
-            for attempt in attempts
-            if attempt[3].pick_feasible and attempt[3].place_feasible
-        ]
+        feasible_attempts = [a for a in attempts if a[4] is True]
         if not feasible_attempts:
             details = ", ".join(
-                f"{side}@{offset:.2f}:"
-                f"{attempt_report.pick_max_error:.4f}/"
-                f"{attempt_report.place_max_error:.4f}"
-                for _, offset, _, attempt_report, _, side in attempts
+                f"{s}@{o:.2f}:"
+                + (f"{p.pick_max_error:.3f}/{p.place_max_error:.3f}"
+                   if hasattr(p, "pick_max_error") else str(p))
+                for _e, s, o, p, _f in attempts
             )
             raise RuntimeError(
-                f"IK infeasible for box {task.index}: "
-                f"attempts [{details}]"
+                f"IK infeasible for box {task.index}: attempts [{details}]"
             )
-        _, selected_offset, scene, report, move_plan, selected_side = min(
-            feasible_attempts, key=lambda attempt: attempt[0]
+        _err, side, stand_off, box_plan, _f = min(
+            feasible_attempts, key=lambda a: a[0]
         )
+        box_plan = t12._reorder_box_plan(box_plan, asset_dof_names)
+        timeline = t12.build_timeline(box_plan)
         print(
-            f"  prepared box={task.index} side={selected_side} "
-            f"stand_off={selected_offset:.2f} "
-            f"pick={report.pick_max_error:.4f} "
-            f"place={report.place_max_error:.4f}"
+            f"  prepared box={task.index} side={side} stand_off={stand_off:.2f} "
+            f"pick={box_plan.pick_max_error:.4f} place={box_plan.place_max_error:.4f} "
+            f"frames={len(timeline)}"
         )
         prepared.append(
             PreparedBox(
                 task=task,
-                scene=scene,
-                timeline=_build_timeline(move_plan, dof_names),
-                source_pose=source_pose,
-                pick_error=report.pick_max_error,
-                place_error=report.place_max_error,
-                stand_off=selected_offset,
-            )
-        )
-        target = task.world_target
-        preset_boxes.append(
-            BoxPlacement(
-                f"placed_{task.index}",
-                (
-                    target[0]
-                    - pallet_center[0]
-                    + PALLET_SIZE[0] * 0.5
-                    - box_size[0] * 0.5,
-                    target[1]
-                    - pallet_center[1]
-                    + PALLET_SIZE[1] * 0.5
-                    - box_size[1] * 0.5,
-                    target[2]
-                    - PALLET_SURFACE_Z
-                    - box_size[2] * 0.5,
-                ),
-                box_size,
+                plan=box_plan,
+                timeline=timeline,
+                pick_error=box_plan.pick_max_error,
+                place_error=box_plan.place_max_error,
+                stand_off=stand_off,
+                side=side,
             )
         )
     return prepared
 
 
-BOX_COLORS = (
-    (0.92, 0.18, 0.08),
-    (0.95, 0.52, 0.05),
-    (0.95, 0.78, 0.08),
-    (0.28, 0.72, 0.22),
-    (0.08, 0.62, 0.72),
-    (0.12, 0.38, 0.88),
-    (0.48, 0.24, 0.82),
-    (0.82, 0.20, 0.62),
-)
-
-
+# 箱子停泊位（远离工作区，依次排开），与 task1_2 _parked_box_pose 同风格。
 def _parked_pose(index: int, box_size) -> tuple[float, float, float]:
-    column = index % 8
-    row = index // 8
-    return (-2.0 - column * 0.55, -2.0 - row * 0.55, box_size[2] * 0.5)
+    return (
+        t12.BOX_PARK_X - t12.BOX_PARK_SPACING * index,
+        -1.2,
+        TABLE_POSE[2] + TABLE_SIZE[2] * 0.5 + box_size[2] * 0.5,
+    )
 
 
-def _create_shared_scene(gym, sim, env, robot_asset, prepared):
+def _create_scene(gym, sim, env, robot_asset, prepared):
+    """对齐 task1_2._create_static_scene：桌、托盘、机器人，箱子从桌边源位出现。
+
+    move_pro 的箱子尺寸各异，因此每个箱子单独建 actor（task1_2 是等大箱共享 asset）。
+    其余（位置、颜色、摩擦、碰撞过滤）对齐 task1_2。
+    """
     robot = gym.create_actor(
-        env,
-        robot_asset,
-        _make_transform(0.0, 0.0, 0.0),
-        "move_pro_robot",
-        0,
-        1,
+        env, robot_asset, _make_transform(0.0, 0.0, 0.0), "move_pro_robot", 0, 1
     )
     fixed = gymapi.AssetOptions()
     fixed.fix_base_link = True
     table_asset = gym.create_box(sim, *TABLE_SIZE, fixed)
+    pallet_center = pallet_center_near_table()
     pallet_asset = gym.create_box(
         sim, PALLET_SIZE[0], PALLET_SIZE[1], PALLET_THICKNESS, fixed
     )
-    table = gym.create_actor(
-        env, table_asset, _make_transform(*TABLE_POSE), "table", 0, 0
-    )
-    pallet_center = pallet_center_near_table()
-    pallet = gym.create_actor(
-        env,
-        pallet_asset,
-        _make_transform(
-            pallet_center[0],
-            pallet_center[1],
-            PALLET_SURFACE_Z - PALLET_THICKNESS * 0.5,
-        ),
-        "pallet",
-        0,
-        0,
-    )
+    table = gym.create_actor(env, table_asset, _make_transform(*TABLE_POSE), "table", 0, 0)
 
     boxes = []
     for index, item in enumerate(prepared):
         sx, sy, sz = item.task.world_size
-        options = gymapi.AssetOptions()
-        options.density = BOX_MASS / (sx * sy * sz)
-        asset = gym.create_box(sim, sx, sy, sz, options)
+        opts = gymapi.AssetOptions()
+        opts.density = BOX_MASS / (sx * sy * sz)
+        asset = gym.create_box(sim, sx, sy, sz, opts)
+        # 第一个箱子摆在源位，其余停泊（与 task1_2 一致：播放时再 reset 到源位）。
+        pose = _source_pose(item.task.world_size) if index == 0 else _parked_pose(index, item.task.world_size)
         box = gym.create_actor(
-            env,
-            asset,
-            _make_transform(*_parked_pose(index, item.task.world_size)),
-            f"move_pro_box_{item.task.index:03d}",
-            0,
-            0,
+            env, asset, _make_transform(*pose), f"move_pro_box_{item.task.index:03d}", 0, 0
         )
         boxes.append(box)
         _set_color(gym, env, box, BOX_COLORS[index % len(BOX_COLORS)])
         _set_shape_friction(
-            gym, env, box, 8.0, rolling_friction=0.08, torsion_friction=0.08
+            gym, env, box,
+            t12.BOX_CONTACT_FRICTION,
+            rolling_friction=t12.BOX_CONTACT_ROLLING_FRICTION,
+            torsion_friction=t12.BOX_CONTACT_TORSION_FRICTION,
         )
 
-    _set_color(gym, env, table, (0.88, 0.88, 0.88))
-    _set_color(gym, env, pallet, (0.15, 0.55, 0.45))
-    _set_shape_friction(
-        gym, env, robot, 6.0, rolling_friction=0.05, torsion_friction=0.05
+    pallet_z = PALLET_SURFACE_Z - PALLET_THICKNESS * 0.5
+    pallet = gym.create_actor(
+        env, pallet_asset,
+        _make_transform(pallet_center[0], pallet_center[1], pallet_z),
+        "pallet", 0, 0,
     )
+    _set_color(gym, env, table, (1.0, 1.0, 1.0))
+    _set_color(gym, env, pallet, (0.15, 0.55, 0.45))
+    _set_shape_friction(gym, env, robot, 6.0, rolling_friction=0.05, torsion_friction=0.05)
     _set_shape_friction(gym, env, table, 2.5)
-    _set_shape_friction(gym, env, pallet, 1.4)
+    _set_shape_friction(gym, env, pallet, t12.PALLET_CONTACT_FRICTION)
     return robot, boxes
 
 
-def _configure_robot(gym, env, robot, dof_names):
-    properties = gym.get_actor_dof_properties(env, robot)
-    properties["driveMode"].fill(gymapi.DOF_MODE_POS)
-    for index, name in enumerate(dof_names):
-        if "xhand_" in name:
-            properties["stiffness"][index] = 120.0
-            properties["damping"][index] = 12.0
-            properties["effort"][index] = max(
-                float(properties["effort"][index]), 35.0
-            )
-        else:
-            properties["stiffness"][index] = 520.0
-            properties["damping"][index] = 52.0
-            properties["effort"][index] = max(
-                float(properties["effort"][index]), 180.0
-            )
-    gym.set_actor_dof_properties(env, robot, properties)
-
-
-def _play_box(
-    gym,
-    sim,
-    env,
-    robot,
-    box,
-    root_states,
-    robot_index: int,
-    box_index: int,
-    dof_names: list[str],
-    item: PreparedBox,
-    viewer,
-    fast: bool,
-    global_frame: int,
-    max_frames: int,
-) -> tuple[int, bool]:
-    _set_actor_root_pose(
-        gym, sim, root_states, box_index, item.source_pose, 0.0, 0.0
+def _source_pose(box_size):
+    """箱子源位姿，箱底贴桌面（与 task1_2.SOURCE_BOX_POSE 同 x/y，z 随箱高）。"""
+    return (
+        t12.SOURCE_BOX_POSE[0],
+        t12.SOURCE_BOX_POSE[1],
+        TABLE_POSE[2] + TABLE_SIZE[2] * 0.5 + box_size[2] * 0.5,
     )
+
+
+BOX_COLORS = (
+    (0.92, 0.18, 0.08), (0.95, 0.52, 0.05), (0.95, 0.78, 0.08), (0.28, 0.72, 0.22),
+    (0.08, 0.62, 0.72), (0.12, 0.38, 0.88), (0.48, 0.24, 0.82), (0.82, 0.20, 0.62),
+)
+
+
+@contextmanager
+def _box_source(box_size):
+    """临时把 task1_2.SOURCE_BOX_POSE 的 z 改为当前箱高对应值。
+
+    task1_2._run_box_timeline 用模块级 SOURCE_BOX_POSE reset 箱子到桌边源位；
+    move_pro 箱子尺寸各异，需让每个箱子按自身高度贴桌面，抓取才一致。
+    """
+    original = t12.SOURCE_BOX_POSE
+    t12.SOURCE_BOX_POSE = _source_pose(box_size)
+    try:
+        yield
+    finally:
+        t12.SOURCE_BOX_POSE = original
+
+
+def _play_box(gym, sim, env, robot, box, root_states, robot_index, box_index,
+              item, viewer, fast, global_frame, max_frames, placed):
+    """播放单个箱子的 timeline（对齐 task1_2._run_box_timeline 的抓取/搬运/释放），
+    并在释放后把箱子运动学锁定到 BPP 目标位姿。
+
+    task1_2 的放置参数是为 0.4m 等大箱调的，靠物理自然落稳；move_pro 的箱子尺寸
+    各异（含很扁/很小的箱），自由落体会翻滚/弹飞。释放后锁定到目标位姿（清零速度）
+    保证确定性落位，且不影响抓取/搬运/路线等其余对齐 task1_2 的行为。
+
+    placed: 之前已放好的箱子 [(box_index, target), ...]。每帧把它们钉回各自目标位姿，
+    防止当前箱子/机器人搬运时撞飞已放好的箱子（撞出托盘、挂边缘等）。
+    """
+    plan = item.plan
+    timeline = item.timeline
+    target = item.task.world_target
+    render_every = 8 if fast else 1
     _set_task_collision_filters(gym, env, robot, box)
-    _set_hand_box_collision_enabled(gym, env, robot, box, enabled=True)
+    t12._reset_box_to_source(gym, sim, root_states, 0, box_index, plan.source_box_yaw)
+
+    def _pin_placed():
+        for placed_index, placed_target in placed:
+            _set_actor_root_pose(gym, sim, root_states, placed_index, placed_target, 0.0, 0.0)
 
     attached = False
     released = False
     attach_offset = None
     attach_yaw_offset = 0.0
     attach_theta_offset = 0.0
-    for local_frame, (phase, root, q, _center, _theta) in enumerate(
-        item.timeline
-    ):
+    pick_started = False
+    pick_count = 0
+    for local_frame, (phase, root, q, _center, _theta) in enumerate(timeline):
         frame = global_frame + local_frame
-        if max_frames > 0 and frame >= max_frames:
+        if max_frames > 0 and local_frame >= max_frames:
             return frame, False
         if viewer is not None and gym.query_viewer_has_closed(viewer):
             return frame, False
 
-        if (
-            not attached
-            and not released
-            and phase == "pick"
-            and local_frame >= ATTACH_AFTER_PICK_FRAMES
-        ):
+        if phase == "pick" and not pick_started:
+            t12._reset_box_to_source(gym, sim, root_states, 0, box_index, plan.source_box_yaw)
+            pick_started = True
+        if phase == "pick":
+            pick_count += 1
+
+        if not attached and not released and phase == "pick" and pick_count >= t12.ATTACH_AFTER_PICK_FRAMES:
             attached = True
             actual_center = _actor_center(gym, env, box)
             actual_yaw, actual_pitch = _actor_yaw_pitch(gym, env, box)
             grasp_center = _grasp_center(gym, env, robot)
             grasp_theta = _grasp_theta(gym, env, robot, root.yaw)
             attach_offset = _inverse_rotate_yaw_pitch(
-                _sub_vec(actual_center, grasp_center),
-                root.yaw,
-                grasp_theta,
-            )
+                _sub_vec(actual_center, grasp_center), root.yaw, grasp_theta)
             attach_yaw_offset = actual_yaw - root.yaw
             attach_theta_offset = actual_pitch - grasp_theta
-            _set_hand_box_collision_enabled(
-                gym, env, robot, box, enabled=False
-            )
-            print(
-                f"move_pro_attach box={item.task.index} frame={frame} "
-                f"offset=({attach_offset[0]:.3f},"
-                f"{attach_offset[1]:.3f},{attach_offset[2]:.3f})"
-            )
+            _set_hand_box_collision_enabled(gym, env, robot, box, enabled=False)
 
-        if attached and not released and phase == "release":
+        if attached and not released and (phase == "release" or phase == "place:place_hold"):
             released = True
             attached = False
-            actual = _actor_center(gym, env, box)
-            print(
-                f"move_pro_release box={item.task.index} frame={frame} "
-                f"actual=({actual[0]:.3f},{actual[1]:.3f},{actual[2]:.3f})"
-            )
 
         gym.refresh_actor_root_state_tensor(sim)
-        _set_actor_root_pose(
-            gym,
-            sim,
-            root_states,
-            robot_index,
-            (root.x, root.y, root.z),
-            root.yaw,
-        )
-        # 释放后把箱子运动学冻结在 BPP 目标位姿：在物理 step 之前先设定位姿
-        # 并清零速度，让物理引擎对它没有净作用，消除"物理推→snap 拉回"的反复横跳
-        # （抖动）。z 即 BPP 目标，箱底正好贴支撑面，不会嵌入。
-        # return 阶段也保持锚定，箱子留在原位不被带走。
+        # 释放后在物理 step 前先锁定到目标，避免抖动/穿插。
         if released:
-            _set_actor_root_pose(
-                gym, sim, root_states, box_index, item.task.world_target, 0.0, 0.0
-            )
+            _set_actor_root_pose(gym, sim, root_states, box_index, target, 0.0, 0.0)
+        _pin_placed()  # 物理 step 前钉住所有已放箱子
+        _set_actor_root_pose(gym, sim, root_states, robot_index, (root.x, root.y, root.z), root.yaw)
         _set_robot_dof_state(gym, env, robot, q)
         if phase == "pick":
-            _lock_mobile_dof_state(gym, env, robot, dof_names)
+            _lock_mobile_dof_state(gym, env, robot, plan.dof_names)
         gym.set_actor_dof_position_targets(env, robot, q.numpy())
         gym.simulate(sim)
         gym.fetch_results(sim, True)
@@ -780,78 +320,41 @@ def _play_box(
             gym.refresh_actor_root_state_tensor(sim)
             grasp_center = _grasp_center(gym, env, robot)
             grasp_theta = _grasp_theta(gym, env, robot, root.yaw)
-            center = _add_vec(
-                grasp_center,
-                _rotate_yaw_pitch(attach_offset, root.yaw, grasp_theta),
-            )
-            _set_actor_root_pose(
-                gym,
-                sim,
-                root_states,
-                box_index,
-                center,
-                root.yaw + attach_yaw_offset,
-                grasp_theta + attach_theta_offset,
-            )
-
-        # 物理 step 之后再设一次，保证目标位姿是该帧最后的权威位姿。
+            center = _add_vec(grasp_center, _rotate_yaw_pitch(attach_offset, root.yaw, grasp_theta))
+            _set_actor_root_pose(gym, sim, root_states, box_index, center,
+                                 root.yaw + attach_yaw_offset, grasp_theta + attach_theta_offset)
+        # 释放后物理 step 之后再锁定一次，保证目标位姿是该帧最后权威。
         if released:
             gym.refresh_actor_root_state_tensor(sim)
-            _set_actor_root_pose(
-                gym, sim, root_states, box_index, item.task.world_target, 0.0, 0.0
-            )
+            _set_actor_root_pose(gym, sim, root_states, box_index, target, 0.0, 0.0)
+        _pin_placed()  # 物理 step 后再钉一次，已放箱子全程不被撞动
 
-        if viewer is not None:
+        if viewer is not None and local_frame % render_every == 0:
             gym.step_graphics(sim)
             gym.draw_viewer(viewer, sim, True)
             if not fast:
                 gym.sync_frame_time(sim)
 
-        if local_frame % 240 == 0:
-            actual = _actor_center(gym, env, box)
-            print(
-                f"frame={frame} box={item.task.index} phase={phase} "
-                f"actual=({actual[0]:.2f},{actual[1]:.2f},{actual[2]:.2f}) "
-                f"attached={attached} released={released}"
-            )
-
-    actual = _actor_center(gym, env, box)
-    error = _distance(actual, item.task.world_target)
     _set_actor_collision_filter(gym, env, box, 0)
+    actual = _actor_center(gym, env, box)
+    error = _distance(actual, target)
     print(
         f"move_pro_box_result box={item.task.index} "
         f"actual=({actual[0]:.3f},{actual[1]:.3f},{actual[2]:.3f}) "
-        f"target=({item.task.world_target[0]:.3f},"
-        f"{item.task.world_target[1]:.3f},{item.task.world_target[2]:.3f}) "
-        f"error={error:.4f}"
+        f"target=({target[0]:.3f},{target[1]:.3f},{target[2]:.3f}) error={error:.4f}"
     )
-    return global_frame + len(item.timeline), True
+    # 当前箱子放完，加入已放列表，后续箱子放置时它会被钉住。
+    placed.append((box_index, target))
+    return global_frame + len(timeline), True
 
 
 class MoveProSimulator:
-    """Run all PCT-selected boxes in one persistent move simulation."""
+    """在一个持久仿真里依次放完所有 PCT 决策的箱子（复用 task1_2 执行层）。"""
 
-    def __init__(
-        self,
-        method: str = "LSAH",
-        container_size=(10, 10, 16),
-        stand_off: float = SIM_PLACE_STAND_OFF,
-    ):
-        self.stand_off = stand_off
-        self.integrator = MoveProIntegrator(
-            method=method,
-            container_size=container_size,
-            stand_off=stand_off,
-        )
+    def __init__(self, method: str = "LSAH", container_size=(10, 10, 16)):
+        self.integrator = MoveProIntegrator(method=method, container_size=container_size)
 
-    def run(
-        self,
-        box_sequence,
-        sizes_are_pct=True,
-        headless=False,
-        fast=False,
-        max_frames=0,
-    ):
+    def run(self, box_sequence, sizes_are_pct=True, headless=False, fast=False, max_frames=0):
         plan = self.integrator.build_plan(
             box_sequence, compute_ik=False, sizes_are_pct=sizes_are_pct
         )
@@ -863,9 +366,9 @@ class MoveProSimulator:
             raise RuntimeError("Isaac Gym failed to create the simulation")
         viewer = None
         try:
-            plane = gymapi.PlaneParams()
-            plane.normal = gymapi.Vec3(0, 0, 1)
-            gym.add_ground(sim, plane)
+            ground = gymapi.PlaneParams()
+            ground.normal = gymapi.Vec3(0, 0, 1)
+            gym.add_ground(sim, ground)
             robot_asset = load_robot_asset(gym, sim)
             if robot_asset is None:
                 raise RuntimeError(f"failed to load robot URDF from {MOVE_URDF}")
@@ -873,90 +376,69 @@ class MoveProSimulator:
             if not dof_names:
                 raise RuntimeError("robot asset contains no active DOFs")
 
-            print("Preparing move IK plans for all boxes...")
-            prepared = _prepare_boxes(plan, dof_names, self.stand_off)
+            print("Preparing task1_2 box plans for all PCT targets...")
+            prepared = _prepare_boxes(plan, dof_names)
             if not prepared:
                 raise RuntimeError("PCT produced no executable boxes")
 
             env = gym.create_env(
-                sim,
-                gymapi.Vec3(-8.0, -5.0, 0.0),
-                gymapi.Vec3(7.0, 7.0, 3.0),
-                1,
+                sim, gymapi.Vec3(-2.0, -2.0, 0.0), gymapi.Vec3(6.8, 6.8, 3.0), 1
             )
-            robot, boxes = _create_shared_scene(
-                gym, sim, env, robot_asset, prepared
-            )
-            _configure_robot(gym, env, robot, dof_names)
+            robot, boxes = _create_scene(gym, sim, env, robot_asset, prepared)
+            t12._configure_robot_dofs(gym, env, robot, dof_names)
             first_q = prepared[0].timeline[0][2]
             _set_robot_dof_state(gym, env, robot, first_q)
             gym.set_actor_dof_position_targets(env, robot, first_q.numpy())
 
             gym.prepare_sim(sim)
-            root_states = gymtorch.wrap_tensor(
-                gym.acquire_actor_root_state_tensor(sim)
-            )
-            robot_index = gym.get_actor_index(
-                env, robot, gymapi.DOMAIN_SIM
-            )
+            root_states = gymtorch.wrap_tensor(gym.acquire_actor_root_state_tensor(sim))
+            robot_index = gym.get_actor_index(env, robot, gymapi.DOMAIN_SIM)
             box_indices = [
-                gym.get_actor_index(env, box, gymapi.DOMAIN_SIM)
-                for box in boxes
+                gym.get_actor_index(env, box, gymapi.DOMAIN_SIM) for box in boxes
             ]
 
             if not headless:
                 viewer = gym.create_viewer(sim, gymapi.CameraProperties())
                 if viewer is None:
                     raise RuntimeError("failed to create Isaac Gym viewer")
-                pallet_center = pallet_center_near_table()
+                pc = pallet_center_near_table()
                 gym.viewer_camera_look_at(
-                    viewer,
-                    env,
-                    gymapi.Vec3(
-                        pallet_center[0] + 1.8,
-                        pallet_center[1] - 2.2,
-                        1.7,
-                    ),
-                    gymapi.Vec3(
-                        pallet_center[0], pallet_center[1], 0.65
-                    ),
+                    viewer, env,
+                    gymapi.Vec3(pc[0] + 1.8, pc[1] - 2.2, 1.7),
+                    gymapi.Vec3(pc[0], pc[1], 0.65),
                 )
 
             global_frame = 0
+            placed = []
             completed = 0
-            for item, box, box_index in zip(
-                prepared, boxes, box_indices
-            ):
+            for item, box, box_index in zip(prepared, boxes, box_indices):
                 print(
                     f"\nmove_pro_start_box box={item.task.index} "
-                    f"size={item.task.world_size} "
-                    f"target={item.task.world_target} "
-                    f"stand_off={item.stand_off:.2f} "
-                    f"ik=({item.pick_error:.4f},{item.place_error:.4f})"
+                    f"size={item.task.world_size} target={item.task.world_target} "
+                    f"side={item.side} stand_off={item.stand_off:.2f}"
                 )
-                global_frame, keep_running = _play_box(
-                    gym,
-                    sim,
-                    env,
-                    robot,
-                    box,
-                    root_states,
-                    robot_index,
-                    box_index,
-                    dof_names,
-                    item,
-                    viewer,
-                    fast,
-                    global_frame,
-                    max_frames,
-                )
+                remaining = 0 if max_frames == 0 else max(0, max_frames - global_frame)
+                if max_frames > 0 and remaining == 0:
+                    break
+                with _box_source(item.task.world_size):
+                    global_frame, keep_running = _play_box(
+                        gym, sim, env, robot, box, root_states,
+                        robot_index, box_index, item, viewer, fast,
+                        global_frame, remaining, placed,
+                    )
                 if not keep_running:
                     break
                 completed += 1
-            print(
-                f"move_pro_result completed={completed}/{len(prepared)} "
-                f"frames={global_frame}"
-            )
+                # 复测所有已放箱子相对各自目标的漂移，验证未被后续放置撞动。
+                drifts = [
+                    (idx, _distance(_actor_center(gym, env, boxes[box_indices.index(idx)]), tgt))
+                    for idx, tgt in placed
+                ]
+                if drifts:
+                    max_drift = max(d for _i, d in drifts)
+                    print(f"move_pro_placed_drift after_box={item.task.index} "
+                          f"n={len(drifts)} max_drift={max_drift:.4f}")
+            print(f"move_pro_result completed={completed}/{len(prepared)} frames={global_frame}")
             return plan
         finally:
             if viewer is not None:

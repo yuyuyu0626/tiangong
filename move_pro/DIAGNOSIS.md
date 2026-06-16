@@ -378,3 +378,48 @@ move 能按箱子位置从托盘四侧选最合适的站位接近，move_pro 退
 12 箱用例中 box 4/8/9 从 +X 侧、box 6 从 +Y 侧接近——正是早期够不到、被可达约束
 屏蔽的托盘远端区域，现在能正常放置。机器人按箱子位置选最合适方向接近，行为与
 move 一致。单元测试 5/5 通过。
+
+---
+
+## 13. 重构：放置流程对齐到 task1_2 架构（已完成）
+
+**起因**：用户反馈 move_pro 在"除决策外"的基础行为（箱子出现、抓取、移动、场景）
+与 move 不一致。根因：move_pro 原本基于 `grab_test_task`（单箱演示脚本）搭建，而
+用户参照的是 `task1_2`（精修多箱垛型流程）——两套不同架构。决定完整重构。
+
+**关键发现**：task1_2 的 `build_direct_box_plan` 内部分两层——
+- 决策层（grid 绑定，正是 PCT 要替换的）：`cell_center_world` /
+  `_box_size_for_sequence` / `_direct_side_for_cell`。
+- 执行层（通用）：pick keyframe、root 路线、place 路径、move IK、`build_timeline`。
+move_pro 用 PCT 决策喂执行层，绕过决策层。
+
+**实现**：
+- 新建 `move_pro/task1_2_adapter.py`：`build_pct_box_plan(target, size, side, stand_off)`
+  用"中性 StackCell"（layer=0, seq=1, mode=direct，不触发任何分层/推入特例）+
+  临时覆盖那 3 个决策函数 + 按箱高覆盖 `SOURCE_BOX_POSE`（pick IK 必须针对箱子实际
+  源位求解），调真实 `build_direct_box_plan` 生成 `t12.BoxPlan`。
+- 重写 `move_pro/simulation.py`：
+  - `_prepare_boxes` 遍历四侧 × 站距，调 adapter 选 IK 最优 BoxPlan，用
+    `t12.build_timeline` 生成 timeline（pick 手指闭合/move 插值/place 路径全与 task1_2 一致）。
+  - `_create_scene` 对齐 `t12._create_static_scene`：箱子从桌边 `SOURCE_BOX_POSE`
+    出现（变尺寸箱单独建 actor）、摩擦/碰撞过滤对齐。
+  - `_play_box` 镜像 `t12._run_box_timeline` 的抓取/搬运/释放，**额外加释放后 snap-lock**：
+    task1_2 靠物理自然落稳（对 0.4m 等大箱 OK），但 move_pro 的变尺寸箱（含很扁/很小的）
+    自由落体会翻滚弹飞，故释放后把箱子运动学锁定到 BPP 目标（清零速度）保证确定性落位。
+
+**移动距离**：task1_2 与 move_pro 同为 5m 对角线（都 `pallet_center_near_table()`）。
+用户确认保持 5m，与 task1_2 一致，取消缩短。
+
+**验证（headless）**：
+
+| 方法 | 种子 | 箱数 | 完成 | 最大误差 |
+|------|------|------|------|---------|
+| LSAH | 42 | 6 | 6/6 | 0.0000 m |
+| OnlineBPH | 7 | 10 | 10/10 | 0.0000 m |
+
+单元测试 5/5 通过。box 3/6/9 放到托盘远端（x 至 4.586）靠四侧站位达成。
+
+### 修改文件
+- 新建 `move_pro/task1_2_adapter.py`
+- 重写 `move_pro/simulation.py`（基于 task1_2 执行层，旧 grab_test 版本被取代）
+- 决策层 `bpp_decider.py` / `integrator.py` / `config.py` 不变。
