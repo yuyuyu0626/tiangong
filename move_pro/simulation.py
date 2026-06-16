@@ -315,6 +315,18 @@ def _build_timeline(plan: dict[str, object], dof_names: list[str]) -> list[Timel
         ("post_release", final_root, release_target, release_center, 0.0)
         for _ in range(FINAL_HOLD_FRAMES)
     )
+
+    # 返回路径：放完箱子后机器人沿来路反向退回桌子起点，而不是瞬间闪回。
+    # 复用 move 的 root_route（table→pallet），反向采样得到 pallet→table。
+    # 手臂保持 release 姿态（已收回），不再携带箱子。
+    return_route = [pose for _, pose in reversed(root_route)]
+    return_frames: list = []
+    for start, goal in zip(return_route, return_route[1:]):
+        if start != goal:
+            return_frames.extend(sample_root_trajectory(start, goal))
+    for root in return_frames:
+        timeline.append(("return", root, release_target, release_center, 0.0))
+
     return _smooth_timeline_joint_steps(timeline, max_joint_step=0.02)
 
 
@@ -614,6 +626,14 @@ def _play_box(
             (root.x, root.y, root.z),
             root.yaw,
         )
+        # 释放后把箱子运动学冻结在 BPP 目标位姿：在物理 step 之前先设定位姿
+        # 并清零速度，让物理引擎对它没有净作用，消除"物理推→snap 拉回"的反复横跳
+        # （抖动）。z 即 BPP 目标，箱底正好贴支撑面，不会嵌入。
+        # return 阶段也保持锚定，箱子留在原位不被带走。
+        if released:
+            _set_actor_root_pose(
+                gym, sim, root_states, box_index, item.task.world_target, 0.0, 0.0
+            )
         _set_robot_dof_state(gym, env, robot, q)
         if phase == "pick":
             _lock_mobile_dof_state(gym, env, robot, dof_names)
@@ -637,6 +657,13 @@ def _play_box(
                 center,
                 root.yaw + attach_yaw_offset,
                 grasp_theta + attach_theta_offset,
+            )
+
+        # 物理 step 之后再设一次，保证目标位姿是该帧最后的权威位姿。
+        if released:
+            gym.refresh_actor_root_state_tensor(sim)
+            _set_actor_root_pose(
+                gym, sim, root_states, box_index, item.task.world_target, 0.0, 0.0
             )
 
         if viewer is not None:

@@ -10,6 +10,7 @@ import numpy as np
 from move_pro.config import (
     BIN_TO_WORLD_SCALE,
     DEFAULT_ITEM_SET,
+    MAX_REACH_X_BIN,
     PALLET_SURFACE_Z,
     pallet_center_world,
 )
@@ -64,6 +65,7 @@ class BPPDecider:
         continuous: bool = False,
         item_set: Optional[Iterable[tuple[int, int, int]]] = None,
         setting: int = 2,
+        max_reach_x_bin: Optional[int] = MAX_REACH_X_BIN,
     ) -> None:
         method = "LASH" if method == "LSAH" else method
         if method not in {"LASH", "OnlineBPH", "DBL", "BR"}:
@@ -83,6 +85,7 @@ class BPPDecider:
         self.method = method
         self.orientation = orientation
         self.setting = setting
+        self.max_reach_x_bin = max_reach_x_bin
         size_minimum = min(min(size) for size in self.item_set)
         self.space = Space(*self.container_size, size_minimum, holder=200)
         self.packed_count = 0
@@ -205,6 +208,16 @@ class BPPDecider:
         )
         return bool(feasible), int(height)
 
+    def _reachable(self, lx: int, x: int) -> bool:
+        """箱子远端边缘是否在机器人可达深度内。
+
+        机器人正对 +x 站在托盘近端，手臂前伸有限。lx+x 是箱子远端边缘的
+        bin 坐标；超过 max_reach_x_bin 的格子机器人够不到（见 config 注释）。
+        """
+        if self.max_reach_x_bin is None:
+            return True
+        return lx + x <= self.max_reach_x_bin
+
     def _placement(self, candidate, score: float) -> Placement:
         lx, ly, lz, x, y, z, orientation = candidate
         world = self.to_world(lx, ly, lz, x, y, z)
@@ -219,6 +232,8 @@ class BPPDecider:
                 if x > ems[3] - ems[0] or y > ems[4] - ems[1] or z > ems[5] - ems[2]:
                     continue
                 lx, ly = int(ems[0]), int(ems[1])
+                if not self._reachable(lx, x):
+                    continue
                 feasible, height = self._virtual((x, y, z), lx, ly)
                 if feasible:
                     yield (lx, ly, height, x, y, z, orientation), ems
@@ -247,6 +262,8 @@ class BPPDecider:
         for ems in sorted(self.space.EMS, key=lambda value: (value[2], value[1], value[0])):
             for orientation, size in self._oriented_sizes(box):
                 lx, ly = int(ems[0]), int(ems[1])
+                if not self._reachable(lx, size[0]):
+                    continue
                 feasible, height = self._virtual(size, lx, ly)
                 if feasible:
                     return self._placement((lx, ly, height, *size, orientation), 0.0)
@@ -258,6 +275,8 @@ class BPPDecider:
         bin_x, bin_y, _ = self.container_size
         for orientation, (x, y, z) in self._oriented_sizes(box):
             for lx in range(bin_x - x + 1):
+                if not self._reachable(lx, x):
+                    continue
                 for ly in range(bin_y - y + 1):
                     feasible, height = self._virtual((x, y, z), lx, ly)
                     score = lx + ly + 100 * height

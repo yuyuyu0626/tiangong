@@ -64,6 +64,14 @@ BIN_TO_WORLD_SCALE = (
     STACK_HEIGHT_LIMIT,                # 10 units → 1.6 m (高度上限)
 )
 
+# ---- 机器人可达性约束 ----
+# 机器人是移动底盘，正对 +x 站在托盘近端边缘，靠手臂前伸放置。
+# 经 tools/probe_reach.py 实测：放置可达上限约为托盘近端起 0.70m 深
+# （世界 x≈4.34），超过则 place IK 误差 > PLACE_ERROR_LIMIT(0.06)。
+# 换算成 PCT bin 坐标（容器 x=10 对应托盘 1.0m）：箱子远端边缘 lx+x_size 不得超过 7。
+# BPPDecider 用它过滤够不到的候选格，避免 LSAH 把箱子放到机器人够不着的地方。
+MAX_REACH_X_BIN = 7
+
 # ---- IK 参数 ----
 DEFAULT_IK_ITERATIONS = 80
 PLACE_IK_ITERATIONS = 80
