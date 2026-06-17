@@ -74,12 +74,21 @@ class MoveProIntegrator:
         self.orientation = orientation
         self.stand_off = stand_off
         self.urdf_path = urdf_path or MOVE_URDF
-        self.decider = BPPDecider(
-            method=method,
-            container_size=container_size,
-            orientation=orientation,
-            setting=setting,
-        )
+        self.use_pct_model = method == "PCT"
+        if self.use_pct_model:
+            # PCT 模型路径：决策走训练好的 GAT 策略（pct_policy），容器/尺度由 config 的 PCT_* 决定。
+            from move_pro.pct_policy import PctModelPlanner
+
+            self.planner = PctModelPlanner()
+            self.decider = None
+        else:
+            self.planner = None
+            self.decider = BPPDecider(
+                method=method,
+                container_size=container_size,
+                orientation=orientation,
+                setting=setting,
+            )
 
     def build_plan(
         self,
@@ -92,6 +101,8 @@ class MoveProIntegrator:
                 "IK is executed by the copied move task implementation, "
                 "not by the PCT decision adapter"
             )
+        if self.use_pct_model:
+            return self._build_plan_pct(box_sequence)
         self.decider.reset()
         plan = MoveProPlan(total_boxes=len(box_sequence))
         for index, input_size in enumerate(box_sequence):
@@ -121,8 +132,41 @@ class MoveProIntegrator:
         plan.utilization = self.decider.utilization()
         return plan
 
+    def _build_plan_pct(self, box_sequence) -> MoveProPlan:
+        """用 PCT 训练好的模型做决策，把每个放置包成 BoxTask。
+
+        box_sequence 是整数 bin 尺寸序列（PCT 物品集 1..5）。模型按序放，放不下即停，
+        放置数可能少于输入箱数（剩余箱视为未放）。
+        """
+        from move_pro.config import PCT_BIN_TO_WORLD_SCALE
+
+        sequence = [tuple(int(v) for v in s) for s in box_sequence]
+        placements = self.planner.plan(box_sequence=sequence)
+        plan = MoveProPlan(total_boxes=len(sequence))
+        for index, p in enumerate(placements):
+            world_size = (
+                p.x * PCT_BIN_TO_WORLD_SCALE[0],
+                p.y * PCT_BIN_TO_WORLD_SCALE[1],
+                p.z * PCT_BIN_TO_WORLD_SCALE[2],
+            )
+            plan.box_tasks.append(
+                BoxTask(
+                    index=index,
+                    original_size=(float(p.x), float(p.y), float(p.z)),
+                    pct_size=(p.x, p.y, p.z),
+                    world_size=world_size,
+                    placement=self.planner.as_placement(p),
+                )
+            )
+            plan.placed_boxes += 1
+        plan.utilization = self.planner.utilization()
+        return plan
+
     def reset(self) -> None:
-        self.decider.reset()
+        if self.use_pct_model:
+            self.planner.reset()
+        else:
+            self.decider.reset()
 
     def _validate_pct_size(self, size) -> tuple[int, int, int]:
         if len(size) != 3:
