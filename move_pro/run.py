@@ -36,13 +36,44 @@ from move_pro.config import DEFAULT_ITEM_SET, pallet_center_world, PALLET_SIZE
 # 以避免在 sim 模式中早于 isaacgym 导入 torch。
 
 
+def _build_box_sequence(args):
+    """按方法构造箱子尺寸序列（整数 bin 尺寸）。
+
+    - PCT 方法：从 PCT 物品集 (1..5) 采样，或从 --dataset 指定的 PCT 数据集读取一条轨迹；
+    - 启发式方法：从 DEFAULT_ITEM_SET (1..4) 采样。
+    """
+    random.seed(args.seed)
+    if args.method == "PCT":
+        from move_pro.config import PCT_SAMPLE_ITEM_SET
+
+        if getattr(args, "dataset", None):
+            return _load_dataset_sequence(args.dataset, args.num_boxes, args.seed)
+        # 采样走收窄的 2..4 区间（抓取友好），模型推理 item_set 仍是 1..5（见 config 注释）。
+        return [random.choice(PCT_SAMPLE_ITEM_SET) for _ in range(args.num_boxes)]
+    return [random.choice(DEFAULT_ITEM_SET) for _ in range(args.num_boxes)]
+
+
+def _load_dataset_sequence(dataset_path, num_boxes, seed):
+    """从 PCT 数据集 (dataset_setting123_discrete.pt) 取一条箱子轨迹。
+
+    数据集每条轨迹是 [(x,y,z,density), ...]；阶段一只用整数尺寸 (x,y,z)。
+    """
+    import torch
+
+    trajs = torch.load(dataset_path, map_location="cpu")
+    idx = seed % len(trajs)
+    boxes = []
+    for item in trajs[idx][:num_boxes]:
+        boxes.append((int(item[0]), int(item[1]), int(item[2])))
+    return boxes
+
+
 def cmd_plan(args):
     """离线 BPP 决策 + 放置预览。"""
     from move_pro.bpp_decider import BPPDecider
     from move_pro.integrator import MoveProIntegrator
 
-    random.seed(args.seed)
-    boxes = [random.choice(DEFAULT_ITEM_SET) for _ in range(args.num_boxes)]
+    boxes = _build_box_sequence(args)
 
     print(f"\n{'='*60}")
     print(f"  move_pro 智能码垛 — 离线决策模式")
@@ -75,8 +106,7 @@ def cmd_sim(args):
     """完整 Isaac Gym 仿真。"""
     from move_pro.simulation import MoveProSimulator
 
-    random.seed(args.seed)
-    boxes = [random.choice(DEFAULT_ITEM_SET) for _ in range(args.num_boxes)]
+    boxes = _build_box_sequence(args)
 
     print(f"\n{'='*60}")
     print(f"  move_pro 智能码垛 — Isaac Gym 仿真模式")
@@ -108,8 +138,12 @@ def main():
     )
     parser.add_argument(
         "--method", type=str, default="LSAH",
-        choices=("LSAH", "OnlineBPH", "DBL", "BR"),
-        help="BPP 启发式方法",
+        choices=("LSAH", "OnlineBPH", "DBL", "BR", "PCT"),
+        help="BPP 决策方法：启发式(LSAH/OnlineBPH/DBL/BR) 或 PCT 可学习模型",
+    )
+    parser.add_argument(
+        "--dataset", type=str, default=None,
+        help="[PCT] 从 PCT 数据集(.pt)读取箱子序列，不指定则随机采样 PCT 物品集(1..5)",
     )
     parser.add_argument(
         "--num-boxes", type=int, default=25,

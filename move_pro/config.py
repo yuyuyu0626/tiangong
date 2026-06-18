@@ -87,3 +87,60 @@ MOVE_PREPLACE_HEIGHT = 0.16
 PICK_LIFT_HEIGHT = 0.20
 PICK_READY_Z_OFFSET = 0.12
 PLACE_RELEASE_HEIGHT = 0.030
+
+# ---- 顶降式避障（阶段二）----
+# 搬运/放置时抬升高度需高过所有已放箱顶面，避免搬运箱/手扫过更高的邻箱。
+# clearance_z = max(已放箱顶面) + PLACE_CARRY_SAFE_MARGIN，再换算成 box-center 抬升量。
+PLACE_CARRY_SAFE_MARGIN = 0.06
+# probe 报告的穿透深度超过此阈值（米）才记为 residual_collision corner case。
+COLLISION_REPORT_THRESHOLD = 0.03
+
+# 释放点偏外 + 推入（消除手掌侧抓贴邻箱的碰撞）。机器人在朝接近侧偏外 PLACE_RELEASE_OUTWARD
+# 的点松手（手掌远离邻箱），释放后箱子 kinematic 平移 PLACE_PUSH_IN_FRAMES 帧推入真实 target，
+# 垛形不变。偏外量按手掌穿透 ~0.12m 取能清掉手掌的值。
+PLACE_RELEASE_OUTWARD = 0.10
+PLACE_PUSH_IN_FRAMES = 90
+
+# ---- PCT 可学习放置策略（阶段一） ----
+# 直接复用 PCT 训练好的模型做放置决策（替换 LASH/OnlineBPH/DBL/BR 启发式）。
+# 这些值绑定模型训练配置，必须与 PCT/givenData.py + tools.py:get_args(setting=1) 一致，
+# 否则归一化/观测维度对不上，模型推理无意义。
+PCT_MODEL_PATH = REPO_ROOT / "setting1_discrete.pt"
+PCT_CONTAINER_SIZE = (10, 10, 10)       # 模型训练容器，勿改
+PCT_SETTING = 1                          # setting1：orientation=2、internal_node_length=6
+PCT_INTERNAL_NODE_HOLDER = 80
+PCT_LEAF_NODE_HOLDER = 50
+PCT_NEXT_HOLDER = 1
+PCT_INTERNAL_NODE_LENGTH = 6             # setting1/2 = 6, setting3 = 7
+PCT_EMBEDDING_SIZE = 64
+PCT_HIDDEN_SIZE = 128
+PCT_GAT_LAYER_NUM = 1
+PCT_NORM_FACTOR = 1.0 / max(PCT_CONTAINER_SIZE)   # = 0.1
+PCT_SHUFFLE = True                       # 与 PCT 评估默认一致（打乱叶子节点顺序）
+
+# PCT 物品尺寸集：整数 1..5（givenData.py，注意比 move_pro 默认的 1..4 大）。
+# 这是模型训练时的物品集，影响观测归一化与 BR 类打分，必须保持 1..5 不动。
+PCT_ITEM_SET = [
+    (i, j, k)
+    for i in range(1, 6)
+    for j in range(1, 6)
+    for k in range(1, 6)
+]
+
+# PCT 实际生成箱子序列的采样集：收窄到 2..4（世界 0.2..0.4m），避开极端尺寸
+# （0.1m 扁箱手指穿模、0.5m 大箱够不到——task1_2 抓取参数按 0.4m 基准箱调，不自适应）。
+# 仅用于 run.py 采样箱序；模型推理时观测里的 item_set 仍是 PCT_ITEM_SET(1..5)，不破坏推理分布。
+PCT_SAMPLE_ITEM_SET = [
+    (i, j, k)
+    for i in range(2, 5)
+    for j in range(2, 5)
+    for k in range(2, 5)
+]
+
+# PCT 决策路径的 bin→世界统一尺度：1 unit = 0.1 m，保持箱子原比例不被拉伸。
+# 容器 (10,10,10) → 托盘 1.0m×1.0m，堆垛高度上限 1.0m。
+PCT_BIN_TO_WORLD_SCALE = (
+    PALLET_SIZE[0] / PCT_CONTAINER_SIZE[0],   # 0.1 m/unit
+    PALLET_SIZE[1] / PCT_CONTAINER_SIZE[1],   # 0.1 m/unit
+    PALLET_SIZE[0] / PCT_CONTAINER_SIZE[0],   # 0.1 m/unit（与 x/y 同尺度，等比）
+)
