@@ -49,7 +49,7 @@ from move.planning import (  # noqa: E402
 
 
 COMPUTE_DEVICE_ID = 0
-GRAPHICS_DEVICE_ID = int(os.environ.get("MOVE_GRAPHICS_DEVICE_ID", "-1"))
+GRAPHICS_DEVICE_ID = int(os.environ.get("MOVE_GRAPHICS_DEVICE_ID", "0"))
 BOX_MASS = 0.35
 PRESET_BOX_MASS = 0.40
 MOBILE_DOF_NAMES = {
