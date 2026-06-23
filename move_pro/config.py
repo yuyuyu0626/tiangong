@@ -98,7 +98,9 @@ COLLISION_REPORT_THRESHOLD = 0.03
 # 释放点偏外 + 推入（消除手掌侧抓贴邻箱的碰撞）。机器人在朝接近侧偏外 PLACE_RELEASE_OUTWARD
 # 的点松手（手掌远离邻箱），释放后箱子 kinematic 平移 PLACE_PUSH_IN_FRAMES 帧推入真实 target，
 # 垛形不变。偏外量按手掌穿透 ~0.12m 取能清掉手掌的值。
-PLACE_RELEASE_OUTWARD = 0.10
+# 对照实验（2026-06-22）：偏外推入疑似帮倒忙——box4/box5 的 0.100m 穿透恰好=偏外量，
+# 说明偏外点本身插进了邻箱。先置 0 取裸碰撞基线，验证后再决定是否彻底换思路。
+PLACE_RELEASE_OUTWARD = 0.0
 PLACE_PUSH_IN_FRAMES = 90
 
 # ---- PCT 可学习放置策略（阶段一） ----
